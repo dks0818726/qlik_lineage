@@ -1,0 +1,12 @@
+fastapi==0.116.1
+uvicorn[standard]==0.35.0
+pydantic>=2.13.4,<2.14
+pydantic-settings==2.10.1
+requests==2.32.3
+websocket-client==1.8.0
+cryptography>=43,<47
+websockets==13.1
+neo4j==5.28.1
+psycopg[binary]>=3.2.10,<3.4
+langgraph==0.5.4
+litellm==1.74.8

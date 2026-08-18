@@ -1,0 +1,64 @@
+# =============================================================================
+# Secrets & credentials — NEVER commit these
+# =============================================================================
+.env
+.env.example
+.copilot-auth/
+backend/certs/
+*.pfx
+*.cer
+*.pem
+*.key
+*.p12
+
+# =============================================================================
+# Python
+# =============================================================================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# =============================================================================
+# Node / Frontend
+# =============================================================================
+node_modules/
+frontend/dist/
+frontend/.vite/
+.pnp
+.pnp.js
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# =============================================================================
+# Docker volumes & exported data (not source, and may contain sensitive paths)
+# =============================================================================
+exported_scripts/
+generated_docs/
+postgres_data/
+neo4j_data/
+
+# =============================================================================
+# OS & editor noise
+# =============================================================================
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

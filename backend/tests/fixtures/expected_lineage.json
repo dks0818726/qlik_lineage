@@ -1,0 +1,54 @@
+{
+  "dependencies": [
+    {
+      "app_id": "SalesDashboard",
+      "connection": "Oracle",
+      "source_table": null,
+      "output_qvd": null,
+      "input_qvd": null,
+      "resident_table": null,
+      "include_file": null,
+      "statement": "LIB CONNECT TO Oracle;"
+    },
+    {
+      "app_id": "SalesDashboard",
+      "connection": "Oracle",
+      "source_table": "orders",
+      "output_qvd": null,
+      "input_qvd": null,
+      "resident_table": null,
+      "include_file": null,
+      "statement": "Orders: SQL SELECT * FROM ORDERS;"
+    },
+    {
+      "app_id": "SalesDashboard",
+      "connection": null,
+      "source_table": null,
+      "output_qvd": "orders.qvd",
+      "input_qvd": null,
+      "resident_table": null,
+      "include_file": null,
+      "statement": "STORE Orders INTO Orders.qvd;"
+    },
+    {
+      "app_id": "SalesDashboard",
+      "connection": null,
+      "source_table": null,
+      "output_qvd": null,
+      "input_qvd": "finance.qvd",
+      "resident_table": null,
+      "include_file": null,
+      "statement": "LOAD * FROM [Finance.qvd];"
+    },
+    {
+      "app_id": "SalesDashboard",
+      "connection": null,
+      "source_table": null,
+      "output_qvd": null,
+      "input_qvd": null,
+      "resident_table": "CustomersStage",
+      "include_file": null,
+      "statement": "LOAD CustomerId, CustomerName RESIDENT CustomersStage;"
+    }
+  ]
+}

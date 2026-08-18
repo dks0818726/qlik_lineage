@@ -1,0 +1,13 @@
+LIB CONNECT TO Oracle;
+
+Orders:
+SQL SELECT * FROM ORDERS;
+
+STORE Orders INTO Orders.qvd;
+
+LOAD * FROM [Finance.qvd];
+
+LOAD
+    CustomerId,
+    CustomerName
+RESIDENT CustomersStage;

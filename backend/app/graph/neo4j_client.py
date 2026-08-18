@@ -1,0 +1,253 @@
+from __future__ import annotations
+
+import logging
+import re
+from dataclasses import dataclass
+from typing import Any, Iterable
+
+try:
+    from neo4j import GraphDatabase, Driver
+except ImportError:  # pragma: no cover - neo4j optional at test time
+    GraphDatabase = None  # type: ignore[assignment]
+    Driver = None  # type: ignore[assignment]
+
+from app.graph.neo4j_upsert import bulk_upsert_payload, constraint_queries
+from app.models.entities import GraphEdge, SCRIPT_DERIVED_RELATIONS
+
+logger = logging.getLogger(__name__)
+
+# Cypher read-only guard: only allow MATCH/RETURN/WITH/UNWIND/CALL/WHERE/ORDER/LIMIT/SKIP/USE.
+WRITE_KEYWORDS = re.compile(
+    r"\b(CREATE|MERGE|SET|DELETE|REMOVE|DETACH|DROP|FOREACH|CALL\s+apoc\.(?!coll|text|convert))\b",
+    re.IGNORECASE,
+)
+
+
+def assert_read_only(cypher: str) -> None:
+    if WRITE_KEYWORDS.search(cypher):
+        raise PermissionError("Cypher statement contains write/destructive keywords; read-only mode enforced.")
+
+
+@dataclass
+class Neo4jClient:
+    uri: str
+    user: str
+    password: str
+
+    def __post_init__(self) -> None:
+        self._driver: Driver | None = None
+        if GraphDatabase is None:
+            logger.warning("neo4j driver not installed; Neo4jClient runs in NO-OP mode.")
+
+    # -- lifecycle ------------------------------------------------------------
+    def connect(self) -> None:
+        if self._driver is not None or GraphDatabase is None:
+            return
+        self._driver = GraphDatabase.driver(self.uri, auth=(self.user, self.password))
+
+    def close(self) -> None:
+        if self._driver is not None:
+            self._driver.close()
+            self._driver = None
+
+    # -- schema ---------------------------------------------------------------
+    def init_schema(self) -> None:
+        if self._driver is None:
+            self.connect()
+        if self._driver is None:
+            return
+        with self._driver.session() as session:
+            for stmt in constraint_queries():
+                session.run(stmt)
+
+    # -- writes ---------------------------------------------------------------
+    def upsert_edges(self, edges: Iterable[GraphEdge]) -> int:
+        if self._driver is None:
+            self.connect()
+        if self._driver is None:
+            return 0
+        payload = bulk_upsert_payload(edges)
+        with self._driver.session() as session:
+            for query, params in payload:
+                session.run(query, **params)
+        return len(payload)
+
+    # -- reads ----------------------------------------------------------------
+    # 500 full path chains routinely exceeded the model context window (one failure
+    # measured at 185k tokens against a 64k limit), so traversals return a bounded
+    # number of shortest paths instead.
+    _MAX_PATHS = 60
+
+    def upstream(self, node_type: str, node_id: str, depth: int = 5) -> list[dict[str, Any]]:
+        depth = max(1, min(depth, 25))
+        cypher = (
+            f"MATCH path = (start:{node_type} {{id: $id}})<-[*1..{depth}]-(n) "
+            "RETURN [x IN nodes(path) | {type: head(labels(x)), id: x.id}] AS chain, length(path) AS depth "
+            f"ORDER BY depth ASC LIMIT {self._MAX_PATHS}"
+        )
+        return self._read(cypher, {"id": node_id})
+
+    def downstream(self, node_type: str, node_id: str, depth: int = 5) -> list[dict[str, Any]]:
+        depth = max(1, min(depth, 25))
+        cypher = (
+            f"MATCH path = (start:{node_type} {{id: $id}})-[*1..{depth}]->(n) "
+            "RETURN [x IN nodes(path) | {type: head(labels(x)), id: x.id}] AS chain, length(path) AS depth "
+            f"ORDER BY depth ASC LIMIT {self._MAX_PATHS}"
+        )
+        return self._read(cypher, {"id": node_id})
+
+    def impact(self, node_type: str, node_id: str, depth: int = 5) -> list[dict[str, Any]]:
+        """Distinct downstream nodes, plus a per-type count so totals survive truncation."""
+        depth = max(1, min(depth, 25))
+        counts = self._read(
+            f"MATCH (start:{node_type} {{id: $id}})-[*1..{depth}]->(n) "
+            "RETURN head(labels(n)) AS type, count(DISTINCT n) AS total "
+            "ORDER BY total DESC",
+            {"id": node_id},
+        )
+        nodes = self._read(
+            f"MATCH (start:{node_type} {{id: $id}})-[*1..{depth}]->(n) "
+            "RETURN DISTINCT head(labels(n)) AS type, n.id AS id LIMIT 200",
+            {"id": node_id},
+        )
+        return [{"_totals_by_type": counts, "_sample_size": len(nodes)}, *nodes]
+
+    def neighborhood(self, node_type: str, node_id: str, depth: int = 2) -> dict[str, list[Any]]:
+        depth = max(1, min(depth, 5))
+        if self._driver is None:
+            self.connect()
+        if self._driver is None:
+            return {"nodes": [], "edges": []}
+        cypher = (
+            f"MATCH path = (c:{node_type} {{id: $id}})-[*0..{depth}]-(n) "
+            "WITH collect(DISTINCT n) AS nset, collect(DISTINCT relationships(path)) AS rsets "
+            "UNWIND rsets AS rs UNWIND rs AS r "
+            "WITH nset, collect(DISTINCT r) AS rels "
+            "RETURN [x IN nset | {id: x.id, type: head(labels(x))}] AS nodes, "
+            "[r IN rels | {source: startNode(r).id, source_type: head(labels(startNode(r))), "
+            "target: endNode(r).id, target_type: head(labels(endNode(r))), relation: type(r)}] AS edges"
+        )
+        with self._driver.session() as session:
+            rec = session.run(cypher, id=node_id).single()
+            if not rec:
+                return {"nodes": [], "edges": []}
+            return {"nodes": rec["nodes"], "edges": rec["edges"]}
+
+    def qvd_variants(self, filename: str) -> list[dict[str, Any]]:
+        """All QVD nodes whose path ends with `filename`, with reader/writer counts.
+
+        The same physical QVD can appear under several ids when a path contains an
+        unresolved Qlik variable (e.g. `lib://$(vServer)/x/y.qvd` alongside
+        `lib://QlikStorage/x/y.qvd`). Callers asking about "a QVD" by name almost always
+        mean the union of those variants, so expose them together rather than letting the
+        model pick one arbitrarily.
+        """
+        name = filename.strip().strip("[]'\"").replace("\\", "/").lower()
+        name = name.rsplit("/", 1)[-1]
+        cypher = (
+            "MATCH (q:QVD) WHERE q.id ENDS WITH $suffix "
+            "OPTIONAL MATCH (q)-[:READS]->(r:App) "
+            "WITH q, count(DISTINCT r) AS readers "
+            "OPTIONAL MATCH (w:App)-[:WRITES]->(q) "
+            "RETURN q.id AS id, readers, count(DISTINCT w) AS writers "
+            "ORDER BY readers DESC LIMIT 50"
+        )
+        rows = self._read(cypher, {"suffix": "/" + name})
+        if not rows:
+            return []
+        total_cypher = (
+            "MATCH (q:QVD) WHERE q.id ENDS WITH $suffix "
+            "OPTIONAL MATCH (q)-[:READS]->(r:App) "
+            "WITH collect(DISTINCT r) AS rs "
+            "RETURN size(rs) AS distinct_reader_apps"
+        )
+        totals = self._read(total_cypher, {"suffix": "/" + name})
+        distinct_readers = totals[0]["distinct_reader_apps"] if totals else None
+        return [
+            {
+                "_summary": (
+                    f"{len(rows)} path variant(s) of '{name}'. "
+                    f"{distinct_readers} distinct apps read it across all variants. "
+                    "Variants containing $(...) are unresolved Qlik variables pointing at "
+                    "the same physical file; report the combined total, not a single row."
+                ),
+                "distinct_reader_apps_all_variants": distinct_readers,
+            },
+            *rows,
+        ]
+
+    def delete_app_edges(self, app_id: str) -> int:
+        """Detach an app from its script-derived relationships, keeping the node.
+
+        Called before re-inserting a changed app's edges so that dependencies removed
+        from the load script disappear from the graph instead of lingering forever.
+        Only script-derived relations are removed: OWNS/RUNS/BELONGS_TO come from QRS
+        and would not be restored if that fetch failed during the same scan.
+        """
+        if self._driver is None:
+            self.connect()
+        if self._driver is None:
+            return 0
+        cypher = (
+            "MATCH (a:App {id: $id})-[r]-() WHERE type(r) IN $rels "
+            "WITH r LIMIT 100000 DELETE r RETURN count(r) AS removed"
+        )
+        with self._driver.session() as session:
+            rec = session.run(cypher, id=app_id,
+                              rels=list(SCRIPT_DERIVED_RELATIONS)).single()
+            return int(rec["removed"]) if rec else 0
+
+    def delete_app(self, app_id: str) -> None:
+        """Remove an app node and its relationships (app deleted in Qlik)."""
+        if self._driver is None:
+            self.connect()
+        if self._driver is None:
+            return
+        with self._driver.session() as session:
+            session.run("MATCH (a:App {id: $id}) DETACH DELETE a", id=app_id)
+
+    def prune_orphan_nodes(self) -> int:
+        """Delete QVD/Table/Task/Connection nodes left with no relationships."""
+        if self._driver is None:
+            self.connect()
+        if self._driver is None:
+            return 0
+        cypher = (
+            "MATCH (n) WHERE (n:QVD OR n:Table OR n:Task OR n:Connection OR n:Owner OR n:Stream) "
+            "AND NOT (n)--() "
+            "WITH n LIMIT 100000 DELETE n RETURN count(n) AS removed"
+        )
+        with self._driver.session() as session:
+            rec = session.run(cypher).single()
+            return int(rec["removed"]) if rec else 0
+
+    def run_cypher(self, cypher: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        assert_read_only(cypher)
+        return self._read(self._ensure_limit(cypher), params or {})
+
+    @staticmethod
+    def _ensure_limit(cypher: str, default_limit: int = 200) -> str:
+        """Append a LIMIT to ad-hoc queries that lack one.
+
+        An unbounded model-authored query can return tens of thousands of rows, which
+        overflows the LLM context window. Aggregate-only queries (a bare `RETURN count(...)`)
+        return a single row and need no cap.
+        """
+        stripped = cypher.strip().rstrip(";").strip()
+        if re.search(r"\bLIMIT\s+\d+\s*$", stripped, re.IGNORECASE):
+            return stripped
+        tail = stripped.rsplit("RETURN", 1)[-1] if "RETURN" in stripped.upper() else ""
+        if tail and re.search(r"\b(count|sum|avg|min|max|collect)\s*\(", tail, re.IGNORECASE):
+            if not re.search(r"\bAS\s+\w+\s*,", tail, re.IGNORECASE):
+                return stripped
+        return f"{stripped} LIMIT {default_limit}"
+
+    # -- internals ------------------------------------------------------------
+    def _read(self, cypher: str, params: dict[str, Any]) -> list[dict[str, Any]]:
+        if self._driver is None:
+            self.connect()
+        if self._driver is None:
+            return []
+        with self._driver.session() as session:
+            result = session.run(cypher, **params)
+            return [dict(record) for record in result]
