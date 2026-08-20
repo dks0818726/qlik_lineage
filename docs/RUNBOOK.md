@@ -1031,7 +1031,69 @@ never auto-regenerated, because generation costs an LLM call.
   first if a script changed recently.
 ---
 
-## 13. Quick reference
+## 13. Re-parsing stored scripts (after a parser change)
+
+A normal scan **skips any app whose `script_hash` has not changed**. That is
+what makes delta scans fast, but it also means that when the *parser itself*
+improves, existing apps keep their old (wrong) lineage forever — the scan sees
+an unchanged script and moves on.
+
+`POST /scan/reparse` fixes that. It re-reads the scripts already stored in
+Postgres, runs them through the current parser, and rebuilds the script-derived
+lineage in Neo4j. It never contacts Qlik, so it is safe to run any time and
+does not need the firewall open to port 4747.
+
+### 13.1 Re-parse everything
+
+```powershell
+cd C:\Users\DKS0818726\Downloads\qlik_lineage
+Set-Content -Path "$env:TEMP\rp.json" -Value '{}' -Encoding ascii
+curl.exe -s -X POST http://localhost:8000/scan/reparse `
+  -H "Content-Type: application/json" --data-binary "@$env:TEMP\rp.json"
+```
+
+Takes roughly 5–10 minutes for 1,759 apps. It returns a summary such as:
+
+```json
+{"apps":1759,"edges":32454,"tables":8170,"qvds":3852,"failed":0}
+```
+
+`failed` should be `0`. If it is not, check `docker compose logs backend`.
+
+### 13.2 Re-parse only specific apps
+
+Useful for testing a parser change before committing to the full run:
+
+```powershell
+$body = '{"app_ids":["0126616e-0448-4d91-a0ff-bc9df6512c26"]}'
+Set-Content -Path "$env:TEMP\rp.json" -Value $body -Encoding ascii
+curl.exe -s -X POST http://localhost:8000/scan/reparse `
+  -H "Content-Type: application/json" --data-binary "@$env:TEMP\rp.json"
+```
+
+### 13.3 What it does and does not touch
+
+- **Rebuilt:** `READS`, `WRITES`, `USES`, `DEPENDS_ON` — everything derived
+  from the load script.
+- **Left alone:** `OWNS`, `RUNS`, `BELONGS_TO`, `SCHEDULED_BY` — these come
+  from the QRS API, not the script, and are not re-fetched here.
+- **Not refreshed:** the script text itself. If a developer edited the script
+  in Qlik, re-parsing will not see it — run a **delta scan** instead
+  (section 11).
+
+### 13.4 When to use which
+
+| Situation | Run |
+| --------- | --- |
+| Developer changed a script in Qlik | delta scan |
+| New apps added / apps deleted | delta scan |
+| The parser was improved or fixed | **re-parse** |
+| Lineage looks wrong but the script has not changed | **re-parse** |
+| Starting completely fresh | full scan (section 5) |
+
+---
+
+## 14. Quick reference
 
 | Task | Command |
 | ---- | ------- |
@@ -1040,6 +1102,7 @@ never auto-regenerated, because generation costs an LLM call.
 | Check status | `docker compose ps` |
 | View logs | `docker compose logs -f --tail 50 backend` |
 | Rebuild after code change | `docker compose up -d --build backend` |
+| Re-parse stored scripts | see section 13 |
 | Health check | `curl.exe -s http://localhost:8000/health` |
 | Web UI | <http://localhost:5173> |
 | Ask the agent a question | see section 7 for the `Ask` helper and 20 example prompts |

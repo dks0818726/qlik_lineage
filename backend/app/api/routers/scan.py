@@ -24,3 +24,18 @@ def run_scan_sync(payload: ScanRequest) -> dict[str, object]:
     if payload.mode not in {"full", "delta"}:
         raise HTTPException(400, "mode must be 'full' or 'delta'")
     return get_orchestrator().run(payload.mode)
+
+
+class ReparseRequest(BaseModel):
+    app_ids: list[str] | None = None
+
+
+@router.post("/reparse")
+def reparse(payload: ReparseRequest | None = None) -> dict[str, object]:
+    """Rebuild lineage from stored scripts, without contacting Qlik.
+
+    Use after the parser changes: a normal scan skips apps whose script hash is
+    unchanged, so parser improvements would otherwise not be applied.
+    """
+    body = payload or ReparseRequest()
+    return get_orchestrator().reparse_stored_scripts(body.app_ids)
