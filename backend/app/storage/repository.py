@@ -115,6 +115,61 @@ class PostgresRepository:
             row = cur.fetchone()
             return row["script_text"] if row else None
 
+    # -- generated documentation ---------------------------------------------
+    def upsert_documentation(self, app_id: str, markdown: str, filename: str,
+                             script_hash_value: str | None, model: str | None,
+                             evidence_level: int, sections: int) -> None:
+        if psycopg is None:
+            return
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO app_documentation
+                    (app_id, markdown, filename, script_hash, model,
+                     evidence_level, sections, generated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+                ON CONFLICT (app_id) DO UPDATE
+                SET markdown = EXCLUDED.markdown,
+                    filename = EXCLUDED.filename,
+                    script_hash = EXCLUDED.script_hash,
+                    model = EXCLUDED.model,
+                    evidence_level = EXCLUDED.evidence_level,
+                    sections = EXCLUDED.sections,
+                    generated_at = NOW();
+                """,
+                (app_id, markdown, filename, script_hash_value, model,
+                 evidence_level, sections),
+            )
+
+    def get_documentation(self, app_id: str) -> dict[str, Any] | None:
+        """Stored document plus a staleness flag.
+
+        `stale` compares the script hash recorded at generation time with the
+        app's current hash, so a document written before a script change is
+        reported as out of date rather than presented as current.
+        """
+        if psycopg is None:
+            return None
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT d.*, a.name AS app_name, a.script_hash AS current_script_hash
+                FROM app_documentation d
+                JOIN apps a ON a.app_id = d.app_id
+                WHERE d.app_id = %s
+                """,
+                (app_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            row["stale"] = bool(
+                row["script_hash"]
+                and row["current_script_hash"]
+                and row["script_hash"] != row["current_script_hash"]
+            )
+            return row
+
     # -- connections / qvds / tables / tasks ---------------------------------
     def upsert_connection(self, connection_id: str, name: str, ctype: str | None = None) -> None:
         if psycopg is None:

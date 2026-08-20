@@ -146,6 +146,30 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_app_documentation",
+            "description": (
+                "Write a full technical documentation file explaining what a Qlik app "
+                "does - its purpose, data sources, transformations, outputs and "
+                "dependencies. Use this when the user asks to document an app, or asks "
+                "what an app does and wants a written document. Accepts either the app "
+                "name or the app id. This is expensive: call it at most once per "
+                "request, and never just to answer a short factual question."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "app": {
+                        "type": "string",
+                        "description": "App name (e.g. 'Sales Dashboard') or app id.",
+                    }
+                },
+                "required": ["app"],
+            },
+        },
+    },
 ]
 
 
@@ -155,6 +179,7 @@ class AgentTools:
 
     repository: PostgresRepository | None = None
     neo4j: Neo4jClient | None = None
+    documentation: Any = None
 
     # -- search ---------------------------------------------------------------
     def search_apps(self, query: str) -> list[dict[str, Any]]:
@@ -202,6 +227,48 @@ class AgentTools:
         if self.neo4j is None:
             return [{"statement": statement, "rows": []}]
         return self.neo4j.run_cypher(statement)
+
+    # -- documentation --------------------------------------------------------
+    def generate_app_documentation(self, app: str) -> dict[str, Any]:
+        """Generate a documentation file and return a small receipt.
+
+        The finished markdown is deliberately NOT returned. A tool result is
+        echoed back into the conversation and re-sent on every subsequent turn,
+        so returning a 1,500-token document would cost 1,500 tokens on every
+        following message for the rest of the session. The frontend picks the
+        receipt out of the trace and fetches the markdown once, over a separate
+        request, when the user actually clicks download.
+        """
+        if self.documentation is None:
+            return {"status": "unavailable",
+                    "message": "Documentation generator is not configured."}
+        # Imported here so the tools module stays importable when the docs
+        # package or litellm is absent (the stub paths above rely on that).
+        from app.docs.generator import AmbiguousApp, AppNotFound
+
+        try:
+            result = self.documentation.generate(app)
+        except AmbiguousApp as exc:
+            return {
+                "status": "ambiguous",
+                "message": str(exc),
+                "candidates": [
+                    {"app_id": c["app_id"], "name": c["name"]}
+                    for c in exc.candidates[:10]
+                ],
+            }
+        except AppNotFound as exc:
+            return {"status": "not_found", "message": str(exc)}
+        return {
+            "status": "written",
+            "app": result.app_name,
+            "app_id": result.app_id,
+            "filename": result.filename,
+            "path": result.path,
+            "bytes": result.bytes,
+            "sections": result.sections,
+            "evidence": result.evidence_label,
+        }
 
     # -- dispatch -------------------------------------------------------------
     def dispatch(self, name: str, arguments: dict[str, Any]) -> Any:

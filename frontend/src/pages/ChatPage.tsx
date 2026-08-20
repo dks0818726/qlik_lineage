@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api } from "../api";
+import DocCard, { findDocReceipt } from "../components/DocCard";
 
 interface Message {
   role: "user" | "assistant";
@@ -14,6 +15,7 @@ const SUGGESTIONS = [
   "Which apps depend on Finance.qvd?",
   "Show downstream dependencies for NightlyReload task.",
   "Show upstream dependencies for Sales Dashboard.",
+  "Document the ISS Extract Archive app.",
 ];
 
 export function ChatPage() {
@@ -60,6 +62,7 @@ export function ChatPage() {
               {m.role === "user" ? "You" : "Copilot"}
             </div>
             <div style={{ whiteSpace: "pre-wrap" }}>{m.content}</div>
+            {findDocReceipt(m.trace) && <DocCard receipt={findDocReceipt(m.trace)!} />}
             {m.trace && m.trace.length > 0 && (
               <details style={{ marginTop: 4 }}>
                 <summary style={{ cursor: "pointer", color: "#64748b" }}>Tool trace ({m.trace.length} steps)</summary>

@@ -176,6 +176,66 @@ class Neo4jClient:
             *rows,
         ]
 
+    def app_lineage(self, app_id: str) -> dict[str, list[str]]:
+        """The exact inputs and outputs of one app, grouped by role.
+
+        Documentation needs these as flat, deduplicated lists rather than the
+        path-shaped output of `neighborhood`, and needs them to be exact -
+        they are the one part of a generated document that is never inferred
+        by a model.
+
+        Edge directions follow the convention actually used in this graph
+        (verified against the live database, not assumed):
+        `(QVD|Table)-[:READS]->(App)`, `(App)-[:WRITES]->(QVD)`,
+        `(App)-[:USES]->(Connection)`, `(App)-[:DEPENDS_ON]->(Table)`,
+        `(Task)-[:RUNS]->(App)`. Getting these backwards yields an
+        empty-but-successful result, which is worse than an error.
+
+        Nodes carry only an `id` property, so app and task ids are returned
+        here and resolved to display names by the caller from Postgres.
+        """
+        cypher = """
+        MATCH (a:App {id: $id})
+        OPTIONAL MATCH (q:QVD)-[:READS]->(a)
+        WITH a, collect(DISTINCT q.id) AS qvds_read
+        OPTIONAL MATCH (t:Table)-[:READS]->(a)
+        WITH a, qvds_read, collect(DISTINCT t.id) AS tables_read
+        OPTIONAL MATCH (a)-[:DEPENDS_ON]->(dt:Table)
+        WITH a, qvds_read, tables_read, collect(DISTINCT dt.id) AS tables_depends_on
+        OPTIONAL MATCH (a)-[:USES]->(c:Connection)
+        WITH a, qvds_read, tables_read, tables_depends_on,
+             collect(DISTINCT c.id) AS connections
+        OPTIONAL MATCH (a)-[:WRITES]->(w:QVD)
+        WITH a, qvds_read, tables_read, tables_depends_on, connections,
+             collect(DISTINCT w.id) AS qvds_written
+        OPTIONAL MATCH (a)-[:WRITES]->(:QVD)-[:READS]->(d:App)
+        WHERE d.id <> a.id
+        WITH a, qvds_read, tables_read, tables_depends_on, connections, qvds_written,
+             collect(DISTINCT d.id) AS downstream_app_ids
+        OPTIONAL MATCH (tk:Task)-[:RUNS]->(a)
+        RETURN qvds_read, tables_read, tables_depends_on, connections, qvds_written,
+               downstream_app_ids, collect(DISTINCT tk.id) AS task_ids
+        """
+        rows = self._read(cypher, {"id": app_id})
+        empty: dict[str, list[str]] = {
+            "qvds_read": [], "tables_read": [], "tables_depends_on": [],
+            "connections": [], "qvds_written": [], "downstream_app_ids": [],
+            "task_ids": [],
+        }
+        if not rows:
+            return empty
+        row = rows[0]
+        return {k: [v for v in (row.get(k) or []) if v] for k in empty}
+
+    def upstream_app_ids(self, app_id: str) -> list[str]:
+        """Apps that write a QVD this app reads - its upstream producers."""
+        cypher = (
+            "MATCH (u:App)-[:WRITES]->(:QVD)-[:READS]->(a:App {id: $id}) "
+            "WHERE u.id <> a.id RETURN collect(DISTINCT u.id) AS ids"
+        )
+        rows = self._read(cypher, {"id": app_id})
+        return [v for v in (rows[0]["ids"] if rows else []) if v]
+
     def delete_app_edges(self, app_id: str) -> int:
         """Detach an app from its script-derived relationships, keeping the node.
 

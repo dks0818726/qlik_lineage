@@ -32,6 +32,18 @@ export interface GraphEdgeView {
   relation: string;
 }
 
+export interface DocumentationReceipt {
+  status: string;
+  app_id: string;
+  app: string;
+  filename: string;
+  path: string;
+  bytes: number;
+  sections: number;
+  evidence?: string;
+  model?: string;
+}
+
 export const api = {
   health: () => request<{ status: string }>("/health"),
   search: (q: string, type?: string) =>
@@ -56,7 +68,45 @@ export const api = {
     request<any>(`/agent/ask`, { method: "POST", body: JSON.stringify({ question }) }),
   scan: (mode: "full" | "delta") =>
     request<any>(`/scan/run`, { method: "POST", body: JSON.stringify({ mode }) }),
+
+  generateDocumentation: (appRef: string) =>
+    request<DocumentationReceipt>(
+      `/apps/${encodeURIComponent(appRef)}/documentation`,
+      { method: "POST" },
+    ),
+  getDocumentation: (appId: string) =>
+    request<any>(`/apps/${encodeURIComponent(appId)}/documentation`),
+  // Markdown cannot go through `request()`, which forces a JSON content type
+  // and calls res.json() - that would throw on a text/markdown body.
+  getDocumentationRaw: async (appId: string): Promise<string> => {
+    const res = await fetch(
+      `${API_BASE}/apps/${encodeURIComponent(appId)}/documentation?format=raw`,
+    );
+    if (!res.ok) {
+      throw new Error(`${res.status} ${res.statusText}: ${await res.text()}`);
+    }
+    return await res.text();
+  },
 };
+
+/** Save markdown to disk as a file, using a filename we already know.
+ *
+ * The name comes from the receipt rather than a Content-Disposition header:
+ * reading that header cross-origin needs Access-Control-Expose-Headers, and
+ * the frontend already has the filename, so this avoids the extra CORS setup.
+ */
+export function downloadMarkdown(filename: string, markdown: string): void {
+  const url = URL.createObjectURL(
+    new Blob([markdown], { type: "text/markdown;charset=utf-8" }),
+  );
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
 
 export function openLineageStream(onMessage: (event: any) => void): WebSocket {
   const ws = new WebSocket(`${WS_BASE}/ws/lineage`);

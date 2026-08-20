@@ -921,7 +921,117 @@ apps=1759 qvds=2518 tables=656 edges=27578
 
 ---
 
-## 12. Quick reference
+---
+
+## 12. Generating app documentation
+
+Ask the agent what an app does and it writes a full technical document to disk.
+
+### 12.1 How to use it
+
+**From chat** — just ask in plain English. The app can be named or given by id:
+
+```
+Document the ISS Extract Archive app.
+What does Pricing - MDO Sales Extract do? Write it up for me.
+Create documentation for 53f30909-2404-4d0d-b345-bd48f9906d3e.
+```
+
+A download card appears under the answer with **Preview** and **Download .md**.
+
+If the name matches more than one app the agent lists the candidates and asks
+which one you meant, rather than guessing. Reply with the full name or the id.
+
+**From the App Details page** — open any app and use the *Documentation* panel:
+**Generate documentation**, then **Preview** or **Download .md**.
+
+**From the API**
+
+| Method | Path | Purpose |
+| ------ | ---- | ------- |
+| `POST` | `/apps/{name-or-id}/documentation` | Generate. Returns a receipt. |
+| `GET` | `/apps/{app_id}/documentation` | Fetch stored doc + staleness flag. |
+| `GET` | `/apps/{app_id}/documentation?format=raw` | `text/markdown` for download. |
+
+```bash
+curl -X POST "http://localhost:8000/apps/ISS%20Extract%20Archive/documentation"
+curl "http://localhost:8000/apps/<app_id>/documentation?format=raw" -o app.md
+```
+
+Generation and retrieval are separate verbs on purpose, so refreshing a page or
+downloading twice never silently triggers another paid LLM call.
+
+### 12.2 Where the files go
+
+`./generated_docs/` on the host, bind-mounted into the container. Filenames are
+`<App_Name>__<short_id>.md` — the id is appended because app names in this
+estate are **not** unique.
+
+The same markdown is also stored in the `app_documentation` table. Downloads are
+served from the table, not from disk, so they stay consistent even if the folder
+is cleared. The folder is git-ignored.
+
+### 12.3 What the document contains
+
+A deterministic header table (app id, owner, stream, last modified, reload task)
+followed by seven sections: Overview, Data sources, Transformations, Output
+tables / fields, Dependencies, Data flow diagram, Notes & recommendations.
+
+The **data flow diagram is rendered in code from the graph**, not written by the
+model, so it always matches real lineage. The footer records how complete the
+evidence was.
+
+### 12.4 Why it does not just send the load script
+
+Scripts in this estate run from 108 characters to **2,520,494** — the largest is
+roughly ten times the entire prompt budget on its own. So the model is sent a
+condensed *evidence pack* instead: exact lineage facts from the graph plus a
+structural skeleton of the script with field lists collapsed to `(N fields)`.
+
+Measured compression: median 12,431 → ~1,400 characters; the 2.5M-character app
+→ ~3,200. Every app in the estate fits comfortably, and the worst case
+documents in about 20 seconds.
+
+If a pack ever did exceed budget it degrades through four levels (full skeleton
+→ drop variables → counts only → section names only) rather than failing, and
+the level used is printed in the footer.
+
+### 12.5 Settings
+
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
+| `DOCGEN_MODEL` | `github_copilot/claude-haiku-4.5` | Model used for docs only |
+| `DOCGEN_MAX_OUTPUT_TOKENS` | `8000` | Output ceiling per document |
+| `DOCGEN_MAX_EVIDENCE_TOKENS` | `12000` | Evidence pack ceiling |
+| `DOCGEN_OUTPUT_DIR` | `generated_docs` | Output folder inside the container |
+| `LLM_MAX_OUTPUT_TOKENS` | `800` | Normal chat answers |
+
+Documentation deliberately uses a **different model from chat**. Measured on
+this Copilot subscription: asked for 8,000 output tokens, `gpt-4o` returned only
+1,610 while `claude-haiku-4.5` returned the full 8,000 — about 5x more usable
+document per call. Chat answers are short, so they stay on the cheaper default.
+
+### 12.6 Staleness
+
+Each document records the script hash it was generated from. If the app's script
+changes in a later scan, the App Details page shows an **"out of date —
+regenerate"** badge and the `GET` response sets `"stale": true`. Documents are
+never auto-regenerated, because generation costs an LLM call.
+
+### 12.7 Notes
+
+- Sections that are entirely commented out are reported as disabled code under
+  *Notes*, never described as active behaviour.
+- Paths containing `$(...)` are unresolved Qlik variables and are flagged as
+  such rather than treated as literal paths.
+- Owner shows as `unknown (id ...)` because the `owners` table is currently
+  empty — the QRS owner fetch has never populated it. This is a pre-existing
+  data gap, not a documentation bug.
+- Documentation reflects the **last scan**, not live Qlik. Run a delta scan
+  first if a script changed recently.
+---
+
+## 13. Quick reference
 
 | Task | Command |
 | ---- | ------- |

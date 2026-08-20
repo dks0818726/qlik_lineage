@@ -17,6 +17,10 @@ services:
       GITHUB_COPILOT_TOKEN_DIR: /root/.config/litellm/github_copilot
     volumes:
       - ./.copilot-auth:/root/.config/litellm/github_copilot
+      # Generated app documentation lands on the host. Without this bind mount
+      # the .md files would be written inside the container only and vanish on
+      # the next rebuild.
+      - ./generated_docs:/app/generated_docs
     ports:
       - "8000:8000"
     depends_on:
