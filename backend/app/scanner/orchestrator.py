@@ -258,6 +258,63 @@ class ScannerOrchestrator:
             )
         return len(edges), qvd_count
 
+    def reparse_stored_scripts(self, app_ids: list[str] | None = None) -> dict[str, Any]:
+        """Rebuild script-derived lineage from scripts already in Postgres.
+
+        A normal scan skips apps whose `script_hash` is unchanged, so improving
+        the parser has no effect until every app is re-fetched from Qlik. The
+        scripts are already stored, though, so they can simply be re-parsed -
+        no QRS, no Engine, no certificates, and orders of magnitude faster.
+
+        Only script-derived relations are replaced. OWNS/RUNS/BELONGS_TO come
+        from the QRS API and are left untouched, so this cannot destroy
+        ownership or schedule lineage.
+        """
+        repo = self.repository
+        with repo._conn() as conn, conn.cursor() as cur:
+            if app_ids:
+                cur.execute(
+                    "SELECT app_id, script_text FROM scripts "
+                    "WHERE script_text IS NOT NULL AND app_id = ANY(%s)",
+                    (list(app_ids),),
+                )
+            else:
+                cur.execute(
+                    "SELECT app_id, script_text FROM scripts WHERE script_text IS NOT NULL"
+                )
+            rows = cur.fetchall()
+
+        stats = {"apps": 0, "edges": 0, "tables": 0, "qvds": 0, "failed": 0}
+        for row in rows:
+            app_id = row["app_id"]
+            try:
+                deps = self.parser.parse(app_id=app_id, script=row["script_text"])
+                for dep in deps:
+                    if dep.connection:
+                        repo.upsert_connection(dep.connection, dep.connection)
+                    if dep.source_table:
+                        repo.upsert_table(dep.source_table, dep.connection)
+                        stats["tables"] += 1
+                    if dep.input_qvd:
+                        repo.upsert_qvd(dep.input_qvd)
+                    if dep.output_qvd:
+                        repo.upsert_qvd(dep.output_qvd)
+                        stats["qvds"] += 1
+
+                edges = self.builder.build_edges(deps)
+                # Replace rather than accumulate, so dependencies the parser no
+                # longer reports actually disappear.
+                repo.delete_app_edges(app_id)
+                self.neo4j.delete_app_edges(app_id)
+                repo.upsert_edges(edges)
+                self.neo4j.upsert_edges(edges)
+                stats["apps"] += 1
+                stats["edges"] += len(edges)
+            except Exception:
+                logger.warning("Re-parse failed for app %s", app_id, exc_info=True)
+                stats["failed"] += 1
+        return stats
+
     def _process_tasks(self, tasks: list[dict[str, Any]]) -> list[GraphEdge]:
         qlik_tasks: list[QlikTask] = []
         for t in tasks:

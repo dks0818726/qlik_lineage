@@ -21,7 +21,10 @@ SQL_SELECT_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 # A single identifier part: backtick/bracket/double-quote quoted, or bare.
-_IDENT_PART = r"(?:`[^`]+`|\[[^\]]+\]|\"[^\"]+\"|[A-Za-z0-9_$#\-]+)"
+# The bare form allows embedded `$(var)` segments so that a partially resolved
+# reference like `$(vPath).sales_v` is captured whole instead of collapsing to
+# a bare `$` and losing the table name.
+_IDENT_PART = r"(?:`[^`]+`|\[[^\]]+\]|\"[^\"]+\"|(?:\$\([^)]*\)|[A-Za-z0-9_$#\-])+)"
 # A (possibly multi-part) table reference, e.g. catalog.schema.table,
 # `project.dataset`.`table`, [db].[dbo].[tbl].
 TABLE_REF_RE = re.compile(rf"{_IDENT_PART}(?:\s*\.\s*{_IDENT_PART})*")
@@ -31,6 +34,18 @@ SQL_KEYWORD_RE = re.compile(r"(FROM|JOIN)\b", re.IGNORECASE)
 _FROM_ARG_FUNCTIONS = {"extract", "substring", "trim", "overlay", "position"}
 # Tokens that are never real tables when they follow FROM/JOIN.
 _NON_TABLE_TOKENS = {"select", "unnest", "lateral", "table", "values", "dual"}
+# A SQL pass-through statement. Qlik accepts a bare `SELECT` after a
+# `LIB CONNECT` as well as the explicit `SQL SELECT` prefix, and the bare form
+# is by far the more common of the two in practice - one real app used it in 25
+# of its 26 SQL statements, so requiring the `SQL` keyword found 2 tables where
+# there were 26. Statements loading from a file or QVD are matched earlier and
+# never reach this test.
+SQL_STATEMENT_RE = re.compile(r"\bSELECT\b", re.IGNORECASE)
+# File suffixes that mark a FROM target as a file rather than a table.
+_FILE_EXTENSIONS = {
+    "qvd", "csv", "txt", "xls", "xlsx", "xlsm", "xml", "json", "parquet",
+    "qvx", "dat", "tsv", "htm", "html", "kml", "log",
+}
 
 STORE_RE = re.compile(
     r"\bSTORE\s+(?:\*\s+FROM\s+)?([A-Za-z0-9_]+)\s+INTO\s+\[?\s*(lib:\/\/[^\];]+|[A-Za-z0-9_./:\\\-$() ]+\.(?:qvd|csv|txt|parquet))\s*\]?\s*(?:\([^)]*\))?\s*;",
@@ -233,7 +248,7 @@ class QlikScriptParser:
                 )
                 continue
 
-            if re.search(r"\bSQL\s+SELECT\b", normalized, re.IGNORECASE):
+            if SQL_STATEMENT_RE.search(normalized):
                 tables = self._sql_table_refs(self._expand_vars(normalized, variables))
                 if tables:
                     for source_table in tables:
@@ -292,6 +307,29 @@ class QlikScriptParser:
         parts.append("".join(buf).strip())
         return ".".join(p for p in parts if p)
 
+    def _looks_like_path(self, ref: str) -> bool:
+        """True when a FROM target is a file or connection URL, not a table.
+
+        Now that bare `SELECT` statements are parsed, a preceding LOAD that
+        reads a file can share a statement with its SELECT, so a `lib://...`
+        or a filename can reach the table extractor. Those are already handled
+        as QVD/file dependencies and must not also be recorded as tables.
+        """
+        low = ref.lower()
+        if "://" in low or low.startswith("lib") and "/" in low:
+            return True
+        if "/" in ref or "\\" in ref:
+            return True
+        return low.rsplit(".", 1)[-1] in _FILE_EXTENSIONS
+
+    def _is_unresolved_ref(self, ref: str) -> bool:
+        """True when nothing but unresolved Qlik variables remains.
+
+        `$(vPath)` carries no table name at all; `$(vPath).sales_v` does.
+        """
+        literal = re.sub(r"\$\([^)]*\)", "", ref)
+        return not any(c.isalnum() for c in literal)
+
     def _sql_table_refs(self, sql: str) -> list[str]:
         """All real tables referenced by FROM/JOIN clauses in a SQL statement.
 
@@ -335,7 +373,18 @@ class QlikScriptParser:
                         ref_match = TABLE_REF_RE.match(rest)
                         if ref_match:
                             table = self._normalize_table_ref(ref_match.group(0))
-                            if table and table.lower() not in _NON_TABLE_TOKENS and table not in seen:
+                            if (
+                                table
+                                and table.lower() not in _NON_TABLE_TOKENS
+                                and not self._looks_like_path(table)
+                                # `FROM $(vPath)` names the table entirely
+                                # through an unresolved variable, so there is
+                                # no usable node. A partially resolved ref such
+                                # as `$(vPath).sales_v` still carries the table
+                                # name and is worth recording.
+                                and not self._is_unresolved_ref(table)
+                                and table not in seen
+                            ):
                                 seen.add(table)
                                 refs.append(table)
                     i = match.end()

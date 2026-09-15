@@ -91,3 +91,20 @@ CREATE TABLE IF NOT EXISTS change_log (
     change_type TEXT NOT NULL,  -- created | updated | deleted
     created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
+
+-- Generated app documentation. Stored alongside the file written to the
+-- mounted output folder so downloads are served transactionally rather than
+-- by reading a container-relative path back off disk.
+CREATE TABLE IF NOT EXISTS app_documentation (
+    app_id TEXT PRIMARY KEY REFERENCES apps (app_id) ON DELETE CASCADE,
+    markdown TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    -- Hash of the script the document was generated from. When this no longer
+    -- matches apps.script_hash the document describes an older script and the
+    -- UI can say "out of date" instead of silently misleading the reader.
+    script_hash TEXT,
+    model TEXT,
+    evidence_level INTEGER NOT NULL DEFAULT 1,
+    sections INTEGER NOT NULL DEFAULT 0,
+    generated_at TIMESTAMP NOT NULL DEFAULT NOW()
+);

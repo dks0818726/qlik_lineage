@@ -8,6 +8,7 @@ from app.agent.workflow import LineageCopilotAgent
 from app.config import settings
 from app.connectors.engine_client import EngineClient
 from app.connectors.qrs_client import QrsClient
+from app.docs.generator import DocumentationGenerator
 from app.graph.neo4j_client import Neo4jClient
 from app.lineage.builder import LineageBuilder
 from app.parser.qlik_parser import QlikScriptParser
@@ -81,5 +82,14 @@ def get_orchestrator() -> ScannerOrchestrator:
 @lru_cache
 def get_agent() -> LineageCopilotAgent:
     return LineageCopilotAgent(
-        tools=AgentTools(repository=get_repository(), neo4j=get_neo4j())
+        tools=AgentTools(
+            repository=get_repository(),
+            neo4j=get_neo4j(),
+            documentation=get_doc_generator(),
+        )
     )
+
+
+@lru_cache
+def get_doc_generator() -> DocumentationGenerator:
+    return DocumentationGenerator(repo=get_repository(), graph=get_neo4j())

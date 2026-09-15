@@ -57,6 +57,14 @@ SYSTEM_PROMPT = (
     "6. Prefer aggregates over listing rows. Ask for counts, then a small sample (LIMIT 10-25). "
     "Ad-hoc queries without a LIMIT are automatically capped, and oversized tool results are "
     "truncated — if you see truncated:true, re-query with count(DISTINCT ...) for exact totals.\n"
+    "\nGenerating documentation: when the user asks you to document an app, or asks for a "
+    "written description of what an app does, call generate_app_documentation with the app "
+    "name or id. It writes a file and returns only a short receipt - that is expected, the "
+    "document itself is not shown to you. Do not attempt to reproduce the document in your "
+    "reply. Simply confirm it was generated, state the filename and how many sections it has, "
+    "and tell the user they can download it. If the receipt says 'ambiguous', list the "
+    "candidate apps and ask which one they meant. Never call this tool more than once per "
+    "request, and never call it to answer a short factual question.\n"
     "\nAnswering style: give the direct answer first with concrete numbers, then a one-line note on "
     "how you derived it. If a result was truncated or ambiguous, say so plainly."
 )
@@ -180,6 +188,7 @@ class LineageCopilotAgent:
             tools=TOOL_SCHEMAS,
             tool_choice="auto",
             temperature=0.1,
+            max_tokens=settings.llm_max_output_tokens,
             **self._completion_kwargs(),
         )
         message = response["choices"][0]["message"]

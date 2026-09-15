@@ -286,3 +286,78 @@ class TestCommentHandling(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBareSelectStatements(unittest.TestCase):
+    """Qlik accepts a bare `SELECT` after a LIB CONNECT, not just `SQL SELECT`.
+
+    Requiring the `SQL` prefix found 2 tables in a real app that referenced 26,
+    because 25 of its 26 SQL statements used the bare form.
+    """
+
+    def setUp(self) -> None:
+        self.parser = QlikScriptParser()
+
+    def _tables(self, script: str) -> set[str]:
+        return {d.source_table for d in self.parser.parse("app", script) if d.source_table}
+
+    def test_bare_select_is_parsed(self) -> None:
+        script = """
+        LIB CONNECT TO 'DDWP';
+        PRODUCT_DIM:
+        LOAD *;
+        SELECT * FROM QLIK_RPT.PRODUCT_DIM;
+        """
+        self.assertEqual(self._tables(script), {"qlik_rpt.product_dim"})
+
+    def test_quoted_schema_and_table(self) -> None:
+        # The dominant real-world form: FROM "SCHEMA"."TABLE".
+        script = 'LIB CONNECT TO \'DDWP\';\nSELECT * FROM "QLIK_RPT"."PRODUCT_DIM";'
+        self.assertEqual(self._tables(script), {"qlik_rpt.product_dim"})
+
+    def test_sql_select_prefix_still_works(self) -> None:
+        script = "LIB CONNECT TO 'DDWP';\nSQL SELECT * FROM DDW.BUYER_DIM;"
+        self.assertEqual(self._tables(script), {"ddw.buyer_dim"})
+
+    def test_many_bare_selects_all_captured(self) -> None:
+        script = "LIB CONNECT TO 'DDWP';\n" + "\n".join(
+            f'T{i}:\nLOAD *;\nSELECT * FROM "SCH"."TBL_{i}";' for i in range(10)
+        )
+        self.assertEqual(len(self._tables(script)), 10)
+
+    def test_bare_select_with_join(self) -> None:
+        script = """
+        LIB CONNECT TO 'DDWP';
+        SELECT a.x FROM qlik_rpt.zip_code_stores zip
+        INNER JOIN qlik_rpt.location_dim ld ON ld.id = zip.id;
+        """
+        self.assertEqual(
+            self._tables(script),
+            {"qlik_rpt.zip_code_stores", "qlik_rpt.location_dim"},
+        )
+
+    def test_file_load_is_not_recorded_as_a_table(self) -> None:
+        # Now that bare SELECT is parsed, file loads must not leak in as tables.
+        script = """
+        Wk53:
+        LOAD * FROM [lib://QlikStorage/EBIR/Workspace/FY22_Wk53.xlsx]
+        (ooxml, embedded labels, table is Sheet1);
+        """
+        self.assertEqual(self._tables(script), set())
+
+    def test_qvd_load_is_not_recorded_as_a_table(self) -> None:
+        script = "T:\nLOAD * FROM [lib://QlikStorage/EBIR/e_product_dim.qvd] (qvd);"
+        self.assertEqual(self._tables(script), set())
+
+    def test_fully_unresolved_variable_table_is_skipped(self) -> None:
+        # `FROM $(vPath)` normalises to a bare "$", which is not a usable node.
+        script = "LIB CONNECT TO 'DDWP';\nSQL SELECT * FROM $(vPath) WHERE x > 1;"
+        self.assertEqual(self._tables(script), set())
+
+    def test_partially_unresolved_variable_table_is_kept(self) -> None:
+        script = "LIB CONNECT TO 'DDWP';\nSELECT * FROM $(vPath).sales_v;"
+        self.assertTrue(any("sales_v" in t for t in self._tables(script)))
+
+    def test_extract_day_from_is_not_a_table(self) -> None:
+        script = "LIB CONNECT TO 'DDWP';\nSELECT EXTRACT(DAY FROM order_date) FROM ddw.orders;"
+        self.assertEqual(self._tables(script), {"ddw.orders"})

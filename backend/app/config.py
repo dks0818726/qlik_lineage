@@ -35,12 +35,33 @@ class Settings(BaseSettings):
     qlik_export_scripts_dir: str = ""
     qlik_max_concurrent_apps: int = 1       # 1 = sequential (safe default)
 
-    litellm_model: str = "copilot/claude-haiku-4.5"
+    litellm_model: str = "github_copilot/gpt-4o"
     litellm_api_base: str = ""
     litellm_api_key: str = ""
 
+    # --- Output token caps ---------------------------------------------------
+    # Copilot enforces a hard prompt-token limit (64k on gpt-4o) and this system
+    # has already breached it once at 185,906 tokens. Output was previously
+    # unbounded because no max_tokens was ever set. These caps bound both ends.
+    llm_max_output_tokens: int = 800          # normal chat answers
+    docgen_max_output_tokens: int = 8000      # documentation: 7 sections needs room
+    docgen_max_evidence_tokens: int = 12000   # ceiling on the evidence pack we send
+    docgen_output_dir: str = "generated_docs" # where .md files are written
+
+    # Documentation uses a SEPARATE model from chat. Measured on this Copilot
+    # subscription: asked for 8,000 output tokens, gpt-4o returned only 1,610
+    # while claude-haiku-4.5 returned the full 8,000 - roughly 5x more usable
+    # document per call, with a 200k context window instead of 128k. Chat answers
+    # are short so they stay on the cheaper default. Blank => use litellm_model.
+    docgen_model: str = "github_copilot/claude-haiku-4.5"
+
     cors_origins: str = "http://localhost:5173,http://localhost:3000"
     scan_interval_seconds: int = 0  # 0 disables background scheduler
+
+    @property
+    def effective_docgen_model(self) -> str:
+        """Model used for documentation, falling back to the chat model if unset."""
+        return self.docgen_model.strip() or self.litellm_model
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
