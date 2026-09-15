@@ -221,7 +221,7 @@ class AgentTools:
     def impact(self, node_type: str, node_id: str, depth: int = 5) -> list[dict[str, Any]]:
         if self.neo4j is None:
             return []
-        return self.neo4j.impact(node_type, node_id, depth)
+        return self.neo4j.impact_scope(node_type, node_id, depth)
 
     def run_cypher(self, statement: str) -> list[dict[str, Any]]:
         if self.neo4j is None:

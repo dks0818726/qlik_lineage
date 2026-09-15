@@ -112,6 +112,47 @@ class Neo4jClient:
         )
         return [{"_totals_by_type": counts, "_sample_size": len(nodes)}, *nodes]
 
+    def impact_scope(self, node_type: str, node_id: str, depth: int = 5) -> list[dict[str, Any]]:
+        """Impact for visualization, with the traversal direction chosen per node type.
+
+        `impact()` walks outgoing edges only. That is correct for Apps, QVDs, Tables
+        and Tasks, which point at their consumers, but a Connection is only ever an
+        edge *target* - the graph stores `(App)-[:USES]->(Connection)` and
+        `(Table)-[:BELONGS_TO]->(Connection)`. Walking outgoing from a Connection
+        therefore always found nothing, so connection impact silently came back empty
+        even when hundreds of apps used it.
+
+        For those inbound-only types the first hop is reversed to collect the direct
+        dependants, then normal downstream traversal continues from each of them.
+        """
+        depth = max(1, min(depth, 25))
+        inbound_first = node_type in {"Connection", "Owner", "Stream", "Schedule"}
+
+        if not inbound_first:
+            return self.impact(node_type, node_id, depth)
+
+        remaining = max(0, depth - 1)
+        counts = self._read(
+            f"MATCH (c:{node_type} {{id: $id}})<-[]-(d) "
+            f"OPTIONAL MATCH (d)-[*0..{remaining}]->(x) "
+            "WITH collect(DISTINCT d) + collect(DISTINCT x) AS all_nodes "
+            "UNWIND all_nodes AS n "
+            "WITH n WHERE n IS NOT NULL "
+            "RETURN head(labels(n)) AS type, count(DISTINCT n) AS total "
+            "ORDER BY total DESC",
+            {"id": node_id},
+        )
+        nodes = self._read(
+            f"MATCH (c:{node_type} {{id: $id}})<-[]-(d) "
+            f"OPTIONAL MATCH (d)-[*0..{remaining}]->(x) "
+            "WITH collect(DISTINCT d) + collect(DISTINCT x) AS all_nodes "
+            "UNWIND all_nodes AS n "
+            "WITH DISTINCT n WHERE n IS NOT NULL "
+            "RETURN head(labels(n)) AS type, n.id AS id LIMIT 200",
+            {"id": node_id},
+        )
+        return [{"_totals_by_type": counts, "_sample_size": len(nodes)}, *nodes]
+
     def neighborhood(self, node_type: str, node_id: str, depth: int = 2) -> dict[str, list[Any]]:
         depth = max(1, min(depth, 5))
         if self._driver is None:
@@ -132,6 +173,75 @@ class Neo4jClient:
             if not rec:
                 return {"nodes": [], "edges": []}
             return {"nodes": rec["nodes"], "edges": rec["edges"]}
+
+    def lineage_scope(
+        self,
+        node_type: str,
+        node_id: str,
+        up_depth: int = 3,
+        down_depth: int = 3,
+        max_paths: int = 400,
+    ) -> dict[str, list[Any]]:
+        """Only the directed upstream and downstream of a node — not its whole neighborhood.
+
+        `neighborhood` walks undirected `-[*0..n]-` hops, which pulls in siblings that
+        merely share a QVD and makes the rendered graph large and slow. Lineage answers
+        "what feeds this" and "what does this feed", so each direction is traversed
+        separately and only the relationships along those directed paths are returned.
+
+        Every node is tagged with `direction` (root/upstream/downstream) so the UI can
+        lay the graph out left-to-right instead of relying on force simulation.
+        """
+        up_depth = max(1, min(up_depth, 10))
+        down_depth = max(1, min(down_depth, 10))
+        if self._driver is None:
+            self.connect()
+        if self._driver is None:
+            return {"nodes": [], "edges": []}
+
+        def _edges(direction: str) -> list[dict[str, Any]]:
+            depth = up_depth if direction == "upstream" else down_depth
+            pattern = (
+                f"(c:{node_type} {{id: $id}})<-[*1..{depth}]-(n)"
+                if direction == "upstream"
+                else f"(c:{node_type} {{id: $id}})-[*1..{depth}]->(n)"
+            )
+            cypher = (
+                f"MATCH path = {pattern} "
+                f"WITH relationships(path) AS rels, length(path) AS d "
+                f"ORDER BY d ASC LIMIT {max_paths} "
+                "UNWIND rels AS r "
+                "RETURN DISTINCT startNode(r).id AS source, "
+                "head(labels(startNode(r))) AS source_type, "
+                "endNode(r).id AS target, head(labels(endNode(r))) AS target_type, "
+                "type(r) AS relation"
+            )
+            return self._read(cypher, {"id": node_id})
+
+        directions: dict[str, str] = {f"{node_type}::{node_id}": "root"}
+        edges: list[dict[str, Any]] = []
+        seen_edges: set[tuple[str, str, str, str, str]] = set()
+
+        for direction in ("upstream", "downstream"):
+            for row in _edges(direction):
+                key = (
+                    row["source_type"], row["source"], row["relation"],
+                    row["target_type"], row["target"],
+                )
+                if key in seen_edges:
+                    continue
+                seen_edges.add(key)
+                edges.append(row)
+                for side in ("source", "target"):
+                    nkey = f"{row[f'{side}_type']}::{row[side]}"
+                    if nkey not in directions:
+                        directions[nkey] = direction
+
+        nodes = [
+            {"id": key.split("::", 1)[1], "type": key.split("::", 1)[0], "direction": value}
+            for key, value in directions.items()
+        ]
+        return {"nodes": nodes, "edges": edges}
 
     def qvd_variants(self, filename: str) -> list[dict[str, Any]]:
         """All QVD nodes whose path ends with `filename`, with reader/writer counts.

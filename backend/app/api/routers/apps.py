@@ -24,10 +24,33 @@ def app_details(app_id: str) -> dict[str, object]:
     neo = get_neo4j()
     return {
         "app": app,
+        # Kept short so the details payload stays light - some scripts are megabytes.
+        # The UI loads the rest on demand from /apps/{app_id}/script.
         "script_excerpt": (script or "")[:2000],
+        "script_chars": len(script or ""),
+        "script_truncated": len(script or "") > 2000,
         "upstream": neo.upstream("App", app_id, depth=3),
         "downstream": neo.downstream("App", app_id, depth=3),
     }
+
+
+@router.get("/{app_id}/script")
+def app_script(app_id: str, format: str = "json"):
+    """Return the complete load script. `?format=raw` serves it as a .qvs download.
+
+    `/apps/{app_id}` only ever returned the first 2000 characters, which hid the
+    bulk of most scripts (91% of stored scripts are longer than that). The full
+    text is fetched separately so large scripts are only transferred on request.
+    """
+    repo = get_repository()
+    if not repo.get_app(app_id):
+        raise HTTPException(status_code=404, detail=f"App not found: {app_id}")
+    script = repo.get_script(app_id)
+    if script is None:
+        raise HTTPException(status_code=404, detail=f"No script stored for app {app_id}")
+    if format == "raw":
+        return PlainTextResponse(script, media_type="text/plain")
+    return {"app_id": app_id, "chars": len(script), "script": script}
 
 
 # -- generated documentation -------------------------------------------------

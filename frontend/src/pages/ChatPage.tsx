@@ -1,12 +1,7 @@
-import { useState } from "react";
+import { useEffect, useRef } from "react";
 import { api } from "../api";
 import DocCard, { findDocReceipt } from "../components/DocCard";
-
-interface Message {
-  role: "user" | "assistant";
-  content: string;
-  trace?: any[];
-}
+import { askQuestion, clearChat, setDraft, useChatSession } from "../chatSession";
 
 const SUGGESTIONS = [
   "What apps use Orders.qvd?",
@@ -19,33 +14,42 @@ const SUGGESTIONS = [
 ];
 
 export function ChatPage() {
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [input, setInput] = useState("");
-  const [busy, setBusy] = useState(false);
+  // Conversation state is held in the session store, not in this component, so it
+  // survives unmounting when the user switches to another tab and comes back.
+  const { messages, busy, draft } = useChatSession();
+  const endRef = useRef<HTMLDivElement | null>(null);
 
-  async function ask(question: string) {
-    if (!question.trim()) return;
-    setMessages((m) => [...m, { role: "user", content: question }]);
-    setInput("");
-    setBusy(true);
-    try {
-      const r = await api.ask(question);
-      setMessages((m) => [
-        ...m,
-        { role: "assistant", content: r.answer || "(no answer)", trace: r.trace || [] },
-      ]);
-    } catch (e: any) {
-      setMessages((m) => [...m, { role: "assistant", content: `Error: ${e}` }]);
-    } finally {
-      setBusy(false);
+  const ask = (question: string) => askQuestion(question, api.ask);
+
+  // Keep the newest message in view, including after returning to this tab.
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ block: "end" });
+  }, [messages.length, busy]);
+
+  function onNewChat() {
+    if (messages.length > 0 && !window.confirm("Clear this conversation and start a new chat?")) {
+      return;
     }
+    clearChat();
   }
 
   return (
     <section>
-      <h2>Copilot Chat</h2>
-      <p style={{ color: "#64748b" }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
+        <h2 style={{ marginBottom: 4 }}>Copilot Chat</h2>
+        {messages.length > 0 && (
+          <span style={{ color: "#94a3b8", fontSize: 12 }}>
+            {messages.filter((m) => m.role === "user").length} question
+            {messages.filter((m) => m.role === "user").length === 1 ? "" : "s"} this session
+          </span>
+        )}
+        <button onClick={onNewChat} disabled={busy || messages.length === 0} style={newChatBtn}>
+          New chat
+        </button>
+      </div>
+      <p style={{ color: "#64748b", marginTop: 4 }}>
         Read-only Qlik lineage agent powered by LiteLLM + LangGraph with tool calling.
+        Your conversation stays in this browser tab and is cleared when you close it.
       </p>
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
         {SUGGESTIONS.map((s) => (
@@ -54,7 +58,7 @@ export function ChatPage() {
           </button>
         ))}
       </div>
-      <div style={{ border: "1px solid #e2e8f0", borderRadius: 8, padding: 12, minHeight: 320, background: "#fff" }}>
+      <div style={{ border: "1px solid #e2e8f0", borderRadius: 8, padding: 12, minHeight: 320, maxHeight: 520, overflowY: "auto", background: "#fff" }}>
         {messages.length === 0 && <p style={{ color: "#94a3b8" }}>Ask anything about your Qlik lineage.</p>}
         {messages.map((m, i) => (
           <div key={i} style={{ marginBottom: 12 }}>
@@ -73,16 +77,18 @@ export function ChatPage() {
             )}
           </div>
         ))}
+        {busy && <div style={{ color: "#94a3b8", fontStyle: "italic" }}>Copilot is thinking…</div>}
+        <div ref={endRef} />
       </div>
       <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
         <input
           placeholder="Ask the Lineage Copilot…"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && !busy && ask(input)}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && !busy && ask(draft)}
           style={{ flex: 1, padding: 8 }}
         />
-        <button onClick={() => ask(input)} disabled={busy}>
+        <button onClick={() => ask(draft)} disabled={busy}>
           {busy ? "Thinking…" : "Send"}
         </button>
       </div>
@@ -93,6 +99,16 @@ export function ChatPage() {
 const chip: React.CSSProperties = {
   padding: "4px 10px",
   borderRadius: 999,
+  border: "1px solid #cbd5e1",
+  background: "#f8fafc",
+  cursor: "pointer",
+  fontSize: 12,
+};
+
+const newChatBtn: React.CSSProperties = {
+  marginLeft: "auto",
+  padding: "4px 12px",
+  borderRadius: 6,
   border: "1px solid #cbd5e1",
   background: "#f8fafc",
   cursor: "pointer",

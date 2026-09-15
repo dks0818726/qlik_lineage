@@ -7,7 +7,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any, ClassVar, Iterable, Iterator
 
 try:
     import psycopg
@@ -87,6 +87,45 @@ class PostgresRepository:
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute("SELECT * FROM apps WHERE app_id = %s", (app_id,))
             return cur.fetchone()
+
+    # -- display names --------------------------------------------------------
+    # Graph nodes carry only an `id`, so anything showing a graph to a human has to
+    # resolve those ids back to names here. Apps are the important case: an app id is
+    # an opaque GUID and is meaningless on screen.
+    _NAME_SOURCES: ClassVar[dict[str, tuple[str, str]]] = {
+        "App": ("apps", "app_id"),
+        "Task": ("tasks", "task_id"),
+        "Owner": ("owners", "owner_id"),
+        "Stream": ("streams", "stream_id"),
+        "Schedule": ("schedules", "schedule_id"),
+        "Connection": ("connections", "connection_id"),
+        "QVD": ("qvds", "qvd_path"),
+        "Table": ("source_tables", "table_id"),
+    }
+
+    def display_names(self, ids_by_type: dict[str, list[str]]) -> dict[str, str]:
+        """Map ``"<Type>::<id>"`` to a human-readable name for the given ids.
+
+        Types without a name table, and ids with no matching row, are simply absent
+        from the result so callers can fall back to the raw id.
+        """
+        names: dict[str, str] = {}
+        if psycopg is None:
+            return names
+        with self._conn() as conn, conn.cursor() as cur:
+            for node_type, ids in ids_by_type.items():
+                source = self._NAME_SOURCES.get(node_type)
+                if not source or not ids:
+                    continue
+                table, key_column = source
+                cur.execute(
+                    f"SELECT {key_column} AS key, name FROM {table} WHERE {key_column} = ANY(%s)",
+                    (list(ids),),
+                )
+                for row in cur.fetchall():
+                    if row["name"]:
+                        names[f"{node_type}::{row['key']}"] = row["name"]
+        return names
 
     # -- scripts --------------------------------------------------------------
     def upsert_script(self, app_id: str, script_text: str) -> str:
@@ -365,40 +404,88 @@ class PostgresRepository:
     # -- search & traversal --------------------------------------------------
     def search_nodes(self, query: str, type_filter: str | None = None,
                      limit: int = 25) -> list[dict[str, Any]]:
+        """Fuzzy node lookup across every entity type shown in the UI.
+
+        Ranking matters here: a substring match on a long QVD path or a
+        connection-prefixed table id would otherwise bury the exact object the
+        user typed. Results are ordered exact id > exact name > name prefix >
+        basename match > anything else, so the intended node is first.
+        """
         if psycopg is None:
             return []
-        like = f"%{query.lower()}%"
+        q = query.strip().lower()
+        like = f"%{q}%"
         results: list[dict[str, Any]] = []
+
+        # rank 0 = exact id, 1 = exact name, 2 = name starts with, 3 = ends with
+        # (basename of a path), 4 = plain substring.
+        def ranked(id_col: str, name_col: str) -> str:
+            return (
+                f"CASE WHEN LOWER({id_col}) = %(q)s THEN 0 "
+                f"WHEN LOWER({name_col}) = %(q)s THEN 1 "
+                f"WHEN LOWER({name_col}) LIKE %(prefix)s THEN 2 "
+                f"WHEN LOWER({id_col}) LIKE %(suffix)s THEN 3 "
+                "ELSE 4 END AS rank"
+            )
+
+        args = {"q": q, "like": like, "prefix": f"{q}%", "suffix": f"%{q}", "limit": limit}
+
+        # (type, table, id column, name column)
+        sources: list[tuple[str, str, str, str]] = [
+            ("App", "apps", "app_id", "name"),
+            ("QVD", "qvds", "qvd_path", "COALESCE(name, qvd_path)"),
+            ("Table", "source_tables", "table_id", "name"),
+            ("Task", "tasks", "task_id", "name"),
+            ("Connection", "connections", "connection_id", "name"),
+            ("Owner", "owners", "owner_id", "name"),
+            ("Stream", "streams", "stream_id", "name"),
+        ]
+
         with self._conn() as conn, conn.cursor() as cur:
-            if not type_filter or type_filter == "App":
+            for node_type, table, id_col, name_col in sources:
+                if type_filter and type_filter != node_type:
+                    continue
                 cur.execute(
-                    "SELECT 'App' AS type, app_id AS id, name FROM apps "
-                    "WHERE LOWER(name) LIKE %s OR LOWER(app_id) LIKE %s LIMIT %s",
-                    (like, like, limit),
+                    f"SELECT '{node_type}' AS type, {id_col} AS id, {name_col} AS name, "
+                    f"{ranked(id_col, name_col)} "
+                    f"FROM {table} "
+                    f"WHERE LOWER({id_col}) LIKE %(like)s OR LOWER({name_col}) LIKE %(like)s "
+                    f"ORDER BY rank, {id_col} LIMIT %(limit)s",
+                    args,
                 )
                 results.extend(cur.fetchall())
-            if not type_filter or type_filter == "QVD":
-                cur.execute(
-                    "SELECT 'QVD' AS type, qvd_path AS id, name FROM qvds "
-                    "WHERE LOWER(qvd_path) LIKE %s LIMIT %s",
-                    (like, limit),
-                )
-                results.extend(cur.fetchall())
-            if not type_filter or type_filter == "Table":
-                cur.execute(
-                    "SELECT 'Table' AS type, table_id AS id, name FROM source_tables "
-                    "WHERE LOWER(table_id) LIKE %s LIMIT %s",
-                    (like, limit),
-                )
-                results.extend(cur.fetchall())
-            if not type_filter or type_filter == "Task":
-                cur.execute(
-                    "SELECT 'Task' AS type, task_id AS id, name FROM tasks "
-                    "WHERE LOWER(name) LIKE %s OR LOWER(task_id) LIKE %s LIMIT %s",
-                    (like, like, limit),
-                )
-                results.extend(cur.fetchall())
-        return results
+
+        results.sort(key=lambda r: (r.get("rank", 4), len(r.get("id") or "")))
+        for r in results:
+            r.pop("rank", None)
+        # Each type is already capped at `limit` by its own query. Only trim the
+        # combined list when the caller asked for a single type, so an untyped
+        # search keeps the same recall it had before ranking was introduced.
+        return results[:limit] if type_filter else results
+
+    def resolve_node(self, node_type: str, reference: str) -> dict[str, Any] | None:
+        """Return the single node a reference points at, or None if it is not unique.
+
+        Impact analysis previously required the caller to know the exact graph id -
+        an app GUID, a full `lib://...` QVD path, or a connection-prefixed table id -
+        and silently returned an empty result when that guess was wrong. Callers use
+        this to accept a human-typed name and fall back to showing candidates.
+        """
+        if psycopg is None:
+            return None
+        matches = self.search_nodes(reference, type_filter=node_type, limit=25)
+        if not matches:
+            return None
+        ref = reference.strip().lower()
+        for m in matches:
+            if (m["id"] or "").lower() == ref:
+                return m
+        if len(matches) == 1:
+            return matches[0]
+        exact_names = [m for m in matches if (m.get("name") or "").lower() == ref]
+        if len(exact_names) == 1:
+            return exact_names[0]
+        return None
 
     # -- scan runs / change log ----------------------------------------------
     def start_scan(self, mode: str) -> str:
