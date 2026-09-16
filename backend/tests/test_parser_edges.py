@@ -223,11 +223,28 @@ class TestVariableExpansion(unittest.TestCase):
         paths = {d.input_qvd for d in deps if d.input_qvd}
         self.assertEqual({"lib://storage/snap_$(vtoday).qvd"}, paths)
 
-    def test_unknown_variable_is_preserved(self) -> None:
-        script = "LOAD * FROM [lib://$(vDefinedElsewhere)/x.qvd];"
+    def test_unresolved_mount_is_stripped_so_variants_aggregate(self) -> None:
+        """QVDs behind an unresolved variable mount collapse onto one node id.
+
+        The same physical QVD is written as lib://$(vPath)/..., lib://$(vServer)/...
+        etc. Keeping the mount would split it into several unconnected nodes.
+        """
+        script = """
+        LOAD * FROM [lib://$(vDefinedElsewhere)/ebir/extract/x.qvd];
+        LOAD * FROM [lib://$(vOtherMount)/ebir/extract/x.qvd];
+        """
         deps = self.parser.parse("app1", script)
         self.assertEqual(
-            {"lib://$(vdefinedelsewhere)/x.qvd"}, {d.input_qvd for d in deps if d.input_qvd}
+            {"ebir/extract/x.qvd"}, {d.input_qvd for d in deps if d.input_qvd}
+        )
+
+    def test_literal_mount_is_preserved(self) -> None:
+        """A named data connection is a real location, so it stays part of the id."""
+        script = "LOAD * FROM [lib://QlikStorage - Prod/ebir/extract/x.qvd];"
+        deps = self.parser.parse("app1", script)
+        self.assertEqual(
+            {"lib://qlikstorage - prod/ebir/extract/x.qvd"},
+            {d.input_qvd for d in deps if d.input_qvd},
         )
 
     def test_variable_in_sql_table_is_expanded(self) -> None:

@@ -111,7 +111,7 @@ class ScannerOrchestrator:
             def _run_app(app: dict[str, Any]) -> tuple[int, int, str | None]:
                 app_id = app.get("id") or app.get("app_id")
                 try:
-                    edges_count, qvd_count = self._process_app(scan_id, app)
+                    edges_count, qvd_count = self._process_app(scan_id, app, force=mode == "full")
                     return edges_count, qvd_count, None
                 except Exception as exc:  # continue on failure per prompt requirement
                     logger.exception("App %s scan failed", app_id)
@@ -193,7 +193,7 @@ class ScannerOrchestrator:
             for row in self.repository.list_apps(limit=10000)
         ]
 
-    def _process_app(self, scan_id: str, app: dict[str, Any]) -> tuple[int, int]:
+    def _process_app(self, scan_id: str, app: dict[str, Any], force: bool = False) -> tuple[int, int]:
         app_id = app.get("id") or app.get("app_id")
         name = app.get("name") or app_id
         owner_id = app.get("owner", {}).get("id") if isinstance(app.get("owner"), dict) else app.get("owner_id")
@@ -209,7 +209,11 @@ class ScannerOrchestrator:
         new_hash = script_hash(script)
         existing = self.repository.get_app(app_id)
         is_new = existing is None
-        changed = is_new or existing.get("script_hash") != new_hash
+        # `force` re-parses even when the script is byte-identical. A full scan uses it
+        # so that parser changes (e.g. how QVD ids are canonicalised) are applied to
+        # every app instead of only the ones whose script happened to change.
+        changed = is_new or force or existing.get("script_hash") != new_hash
+        script_changed = is_new or existing.get("script_hash") != new_hash
 
         self.repository.upsert_app(app_id, name, owner_id, stream_id, new_hash, modified)
         self.repository.upsert_script(app_id, script)
@@ -217,11 +221,12 @@ class ScannerOrchestrator:
         if not changed:
             return 0, 0
 
-        self.repository.log_change(scan_id, "App", app_id, "created" if is_new else "updated")
-        event_bus.publish_sync(
-            lineage_event("node.updated" if not is_new else "node.created",
-                          {"type": "App", "id": app_id, "name": name})
-        )
+        if script_changed:
+            self.repository.log_change(scan_id, "App", app_id, "created" if is_new else "updated")
+            event_bus.publish_sync(
+                lineage_event("node.updated" if not is_new else "node.created",
+                              {"type": "App", "id": app_id, "name": name})
+            )
 
         deps = self.parser.parse(app_id=app_id, script=script)
         qvd_count = 0

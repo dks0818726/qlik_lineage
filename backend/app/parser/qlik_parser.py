@@ -82,7 +82,11 @@ SET_VAR_RE = re.compile(
     r"^(?:SET|LET)\s+([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*(.*?)\s*;?$",
     re.IGNORECASE | re.DOTALL,
 )
-VAR_REF_RE = re.compile(r"\$\(([^()$]*)\)")# Strip line comments but DO NOT eat the `//` inside `lib://...` URLs (negative lookbehind on `:`).
+VAR_REF_RE = re.compile(r"\$\(([^()$]*)\)")
+# `lib://<mount>/<rest>` — splits a Qlik lib path into its mount (data connection
+# or unresolved variable) and the path beneath it.
+LIB_MOUNT_RE = re.compile(r"^lib://([^/]*)/(.+)$", re.IGNORECASE)
+# Strip line comments but DO NOT eat the `//` inside `lib://...` URLs (negative lookbehind on `:`).
 LINE_COMMENT_RE = re.compile(r"(?m)(?<!:)//[^\n]*|(?<![\w-])--[^\n]*")
 
 
@@ -101,8 +105,37 @@ class QlikScriptParser:
 
     @staticmethod
     def canonical_qvd(path: str) -> str:
-        """Canonical id for a QVD/file path: forward slashes, lower case."""
-        return path.strip().strip("[]\"'").replace("\\", "/").lower()
+        """Canonical id for a QVD/file path: forward slashes, lower case.
+
+        QVDs whose mount is an *unresolved* variable are additionally collapsed
+        onto the path beneath the mount - see :meth:`_strip_unresolved_mount`.
+        """
+        cleaned = path.strip().strip("[]\"'").replace("\\", "/").lower()
+        return QlikScriptParser._strip_unresolved_mount(cleaned)
+
+    @staticmethod
+    def _strip_unresolved_mount(path: str) -> str:
+        """Drop ``lib://<mount>/`` when the mount is an unresolved variable.
+
+        The same physical QVD is reached through many mount spellings
+        (``lib://$(vPath)/...``, ``lib://$(vServer)/...``, ``lib://$(vTargetServer)/...``).
+        Because those variables are defined outside the script we cannot resolve
+        them, so keeping them in the id splits one QVD into several nodes and
+        breaks the read/write chain between apps. Anything after the mount is the
+        stable part of the path, so that alone becomes the id.
+
+        Mounts that are literal data connection names (``lib://qlikstorage/...``)
+        are left intact: they are real, distinguishable locations.
+        """
+        if not path.endswith(".qvd"):
+            return path
+        match = LIB_MOUNT_RE.match(path)
+        if not match:
+            return path
+        mount, remainder = match.group(1), match.group(2)
+        if "$" not in mount or not remainder:
+            return path
+        return remainder
 
     @staticmethod
     def canonical_table(name: str) -> str:
