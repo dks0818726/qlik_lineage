@@ -5,6 +5,11 @@ from app.dependencies import get_neo4j, get_repository
 
 router = APIRouter(prefix="/graph", tags=["graph"])
 
+# /impact-report renders directly in the UI rather than an LLM prompt, so it isn't
+# subject to the agent tools' context-window path/node caps (see Neo4jClient._MAX_PATHS).
+# Paths/nodes are now deduped per target, so this only bounds pathological graphs.
+_REPORT_LIMIT = 5000
+
 
 @router.get("/upstream")
 def upstream(node_type: str, node_id: str, depth: int = Query(default=5, ge=1, le=20)) -> dict[str, object]:
@@ -59,7 +64,9 @@ def impact_report(
 
     node_id = resolved["id"]
     neo = get_neo4j()
-    raw = neo.impact_scope(node_type, node_id, depth)
+    # This is a human-facing report (not an LLM tool call), so it is not bound by
+    # the agent's context-window path/node caps - request the full set instead.
+    raw = neo.impact_scope(node_type, node_id, depth, node_limit=_REPORT_LIMIT)
     meta = raw[0] if raw and "_totals_by_type" in raw[0] else {"_totals_by_type": []}
     impacted = [r for r in raw if "_totals_by_type" not in r]
 
@@ -84,10 +91,10 @@ def impact_report(
     inbound_only = node_type in {"Connection", "Owner", "Stream", "Schedule"}
     if inbound_only:
         upstream: list[dict[str, object]] = []
-        downstream = _named_chains(repo, neo.upstream(node_type, node_id, depth))
+        downstream = _named_chains(repo, neo.upstream(node_type, node_id, depth, max_paths=_REPORT_LIMIT))
     else:
-        upstream = _named_chains(repo, neo.upstream(node_type, node_id, depth))
-        downstream = _named_chains(repo, neo.downstream(node_type, node_id, depth))
+        upstream = _named_chains(repo, neo.upstream(node_type, node_id, depth, max_paths=_REPORT_LIMIT))
+        downstream = _named_chains(repo, neo.downstream(node_type, node_id, depth, max_paths=_REPORT_LIMIT))
 
     return {
         "status": "ok",

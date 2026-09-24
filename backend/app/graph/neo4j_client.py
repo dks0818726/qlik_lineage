@@ -73,32 +73,42 @@ class Neo4jClient:
         return len(payload)
 
     # -- reads ----------------------------------------------------------------
-    # 500 full path chains routinely exceeded the model context window (one failure
-    # measured at 185k tokens against a 64k limit), so traversals return a bounded
-    # number of shortest paths instead.
+    # Agent tool calls feed these chains straight into an LLM prompt, and 500 full
+    # path chains routinely exceeded the model context window (one failure measured
+    # at 185k tokens against a 64k limit), so agent-facing calls default to a bounded
+    # number of paths. UI-facing callers (e.g. /graph/impact-report) pass a much
+    # larger max_paths since they render the full list rather than an LLM prompt.
     _MAX_PATHS = 60
+    _MAX_NODE_SAMPLE = 200
 
-    def upstream(self, node_type: str, node_id: str, depth: int = 5) -> list[dict[str, Any]]:
+    def upstream(self, node_type: str, node_id: str, depth: int = 5, max_paths: int | None = None) -> list[dict[str, Any]]:
         depth = max(1, min(depth, 25))
+        limit = self._MAX_PATHS if max_paths is None else max_paths
         cypher = (
             f"MATCH path = (start:{node_type} {{id: $id}})<-[*1..{depth}]-(n) "
-            "RETURN [x IN nodes(path) | {type: head(labels(x)), id: x.id}] AS chain, length(path) AS depth "
-            f"ORDER BY depth ASC LIMIT {self._MAX_PATHS}"
+            "WITH n, path, length(path) AS d ORDER BY d ASC "
+            "WITH n, collect(path)[0] AS path, min(d) AS depth "
+            "RETURN [x IN nodes(path) | {type: head(labels(x)), id: x.id}] AS chain, depth "
+            f"ORDER BY depth ASC LIMIT {limit}"
         )
         return self._read(cypher, {"id": node_id})
 
-    def downstream(self, node_type: str, node_id: str, depth: int = 5) -> list[dict[str, Any]]:
+    def downstream(self, node_type: str, node_id: str, depth: int = 5, max_paths: int | None = None) -> list[dict[str, Any]]:
         depth = max(1, min(depth, 25))
+        limit = self._MAX_PATHS if max_paths is None else max_paths
         cypher = (
             f"MATCH path = (start:{node_type} {{id: $id}})-[*1..{depth}]->(n) "
-            "RETURN [x IN nodes(path) | {type: head(labels(x)), id: x.id}] AS chain, length(path) AS depth "
-            f"ORDER BY depth ASC LIMIT {self._MAX_PATHS}"
+            "WITH n, path, length(path) AS d ORDER BY d ASC "
+            "WITH n, collect(path)[0] AS path, min(d) AS depth "
+            "RETURN [x IN nodes(path) | {type: head(labels(x)), id: x.id}] AS chain, depth "
+            f"ORDER BY depth ASC LIMIT {limit}"
         )
         return self._read(cypher, {"id": node_id})
 
-    def impact(self, node_type: str, node_id: str, depth: int = 5) -> list[dict[str, Any]]:
+    def impact(self, node_type: str, node_id: str, depth: int = 5, node_limit: int | None = None) -> list[dict[str, Any]]:
         """Distinct downstream nodes, plus a per-type count so totals survive truncation."""
         depth = max(1, min(depth, 25))
+        limit = self._MAX_NODE_SAMPLE if node_limit is None else node_limit
         counts = self._read(
             f"MATCH (start:{node_type} {{id: $id}})-[*1..{depth}]->(n) "
             "RETURN head(labels(n)) AS type, count(DISTINCT n) AS total "
@@ -107,12 +117,12 @@ class Neo4jClient:
         )
         nodes = self._read(
             f"MATCH (start:{node_type} {{id: $id}})-[*1..{depth}]->(n) "
-            "RETURN DISTINCT head(labels(n)) AS type, n.id AS id LIMIT 200",
+            f"RETURN DISTINCT head(labels(n)) AS type, n.id AS id LIMIT {limit}",
             {"id": node_id},
         )
         return [{"_totals_by_type": counts, "_sample_size": len(nodes)}, *nodes]
 
-    def impact_scope(self, node_type: str, node_id: str, depth: int = 5) -> list[dict[str, Any]]:
+    def impact_scope(self, node_type: str, node_id: str, depth: int = 5, node_limit: int | None = None) -> list[dict[str, Any]]:
         """Impact for visualization, with the traversal direction chosen per node type.
 
         `impact()` walks outgoing edges only. That is correct for Apps, QVDs, Tables
@@ -126,10 +136,11 @@ class Neo4jClient:
         dependants, then normal downstream traversal continues from each of them.
         """
         depth = max(1, min(depth, 25))
+        limit = self._MAX_NODE_SAMPLE if node_limit is None else node_limit
         inbound_first = node_type in {"Connection", "Owner", "Stream", "Schedule"}
 
         if not inbound_first:
-            return self.impact(node_type, node_id, depth)
+            return self.impact(node_type, node_id, depth, node_limit=limit)
 
         remaining = max(0, depth - 1)
         counts = self._read(
@@ -148,7 +159,7 @@ class Neo4jClient:
             "WITH collect(DISTINCT d) + collect(DISTINCT x) AS all_nodes "
             "UNWIND all_nodes AS n "
             "WITH DISTINCT n WHERE n IS NOT NULL "
-            "RETURN head(labels(n)) AS type, n.id AS id LIMIT 200",
+            f"RETURN head(labels(n)) AS type, n.id AS id LIMIT {limit}",
             {"id": node_id},
         )
         return [{"_totals_by_type": counts, "_sample_size": len(nodes)}, *nodes]
