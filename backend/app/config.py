@@ -47,6 +47,9 @@ class Settings(BaseSettings):
     docgen_max_output_tokens: int = 8000      # documentation: 7 sections needs room
     docgen_max_evidence_tokens: int = 12000   # ceiling on the evidence pack we send
     docgen_output_dir: str = "generated_docs" # where .md files are written
+    docgen_max_retries: int = 5               # retries after the initial 429 response
+    docgen_retry_base_seconds: float = 2.0     # exponential-backoff starting delay
+    docgen_retry_max_seconds: float = 60.0     # cap for fallback backoff delays
 
     # Documentation uses a SEPARATE model from chat. Measured on this Copilot
     # subscription: asked for 8,000 output tokens, gpt-4o returned only 1,610
