@@ -61,6 +61,45 @@ class Neo4jClient:
                 session.run(stmt)
 
     # -- writes ---------------------------------------------------------------
+    def set_app_statuses(self, statuses: Iterable[Any], batch_size: int = 1000) -> int:
+        """Copy status flags onto existing App nodes so Cypher can filter on them.
+
+        Uses MATCH, not MERGE: an app with no lineage edges has no node, and creating
+        one here would add unconnected App nodes to the graph.
+        """
+        if self._driver is None:
+            self.connect()
+        if self._driver is None:
+            return 0
+        rows = [
+            {
+                "id": s["app_id"],
+                "app_status": s["app_status"],
+                "status_reason": s["status_reason"],
+                "published": bool(s.get("published")),
+                "is_copy": bool(s.get("is_copy")),
+                "original_app_id": s.get("original_app_id"),
+                "last_reload_at": s.get("last_reload_at"),
+                "has_enabled_task": bool(s.get("has_enabled_task")),
+            }
+            for s in (x.to_dict() if hasattr(x, "to_dict") else dict(x) for x in statuses)
+        ]
+        cypher = (
+            "UNWIND $rows AS r MATCH (a:App {id: r.id}) "
+            "SET a.app_status = r.app_status, a.status_reason = r.status_reason, "
+            "a.published = r.published, a.is_copy = r.is_copy, "
+            "a.original_app_id = r.original_app_id, a.has_enabled_task = r.has_enabled_task, "
+            "a.last_reload_at = CASE WHEN r.last_reload_at IS NULL THEN null "
+            "ELSE datetime(r.last_reload_at) END "
+            "RETURN count(a) AS updated"
+        )
+        updated = 0
+        with self._driver.session() as session:
+            for start in range(0, len(rows), batch_size):
+                rec = session.run(cypher, rows=rows[start:start + batch_size]).single()
+                updated += int(rec["updated"]) if rec else 0
+        return updated
+
     def upsert_edges(self, edges: Iterable[GraphEdge]) -> int:
         if self._driver is None:
             self.connect()

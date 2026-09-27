@@ -61,6 +61,11 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:5173,http://localhost:3000"
     scan_interval_seconds: int = 0  # 0 disables background scheduler
 
+    # An unpublished app with no reload in this many days is flagged "stale", and a
+    # scheduled app must have reloaded within it to count as "live". After changing it,
+    # POST /scan/app-status re-classifies every app without a full rescan.
+    app_stale_days: int = 90
+
     @property
     def effective_docgen_model(self) -> str:
         """Model used for documentation, falling back to the chat model if unset."""

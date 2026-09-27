@@ -74,16 +74,26 @@ def impact_report(
     for row in impacted:
         ids_by_type.setdefault(row["type"], []).append(row["id"])
     names = repo.display_names(ids_by_type)
+    statuses = repo.app_statuses(ids_by_type.get("App", []))
 
     grouped: dict[str, list[dict[str, str]]] = {}
     for row in impacted:
-        grouped.setdefault(row["type"], []).append(
-            {"id": row["id"], "name": names.get(f"{row['type']}::{row['id']}") or row["id"]}
-        )
+        item = {"id": row["id"], "name": names.get(f"{row['type']}::{row['id']}") or row["id"]}
+        if row["type"] == "App" and row["id"] in statuses:
+            item.update(_status_fields(statuses[row["id"]]))
+        grouped.setdefault(row["type"], []).append(item)
     for items in grouped.values():
         items.sort(key=lambda x: x["name"].lower())
 
+    # A change that "impacts 40 apps" reads very differently when 30 of them are
+    # abandoned dev copies, so report the split rather than making users count.
+    app_status_counts: dict[str, int] = {}
+    for item in grouped.get("App", []):
+        key = item.get("app_status") or "unknown"
+        app_status_counts[key] = app_status_counts.get(key, 0) + 1
+
     totals = {t["type"]: t["total"] for t in meta.get("_totals_by_type", [])}
+    root_status = repo.app_statuses([node_id]).get(node_id) if node_type == "App" else None
 
     # Connections/owners/streams are only ever edge targets, so the nodes that depend
     # on them are reached by traversing inbound. Presenting those as "upstream" would
@@ -98,17 +108,28 @@ def impact_report(
 
     return {
         "status": "ok",
-        "node": {"type": node_type, "id": node_id, "name": resolved.get("name") or node_id},
+        "node": {"type": node_type, "id": node_id, "name": resolved.get("name") or node_id,
+                 **(_status_fields(root_status) if root_status else {})},
         "summary": {
             "total_impacted": sum(totals.values()),
             "by_type": totals,
             "upstream_paths": len(upstream),
             "downstream_paths": len(downstream),
             "truncated": sum(totals.values()) > len(impacted),
+            "app_status": app_status_counts,
         },
         "impacted": grouped,
         "upstream": upstream,
         "downstream": downstream,
+    }
+
+
+def _status_fields(status: dict[str, object]) -> dict[str, object]:
+    """The subset of an app's status that graph and impact responses carry."""
+    return {
+        "app_status": status.get("app_status"),
+        "status_reason": status.get("status_reason"),
+        "last_reload_at": status.get("last_reload_at"),
     }
 
 
@@ -161,9 +182,12 @@ def lineage(
     for node in nodes:
         ids_by_type.setdefault(node["type"], []).append(node["id"])
     names = get_repository().display_names(ids_by_type)
+    statuses = get_repository().app_statuses(ids_by_type.get("App", []))
 
     for node in nodes:
         node["name"] = names.get(f"{node['type']}::{node['id']}") or node["id"]
+        if node["type"] == "App" and node["id"] in statuses:
+            node.update(_status_fields(statuses[node["id"]]))
 
     return {
         "node": {"type": node_type, "id": node_id},

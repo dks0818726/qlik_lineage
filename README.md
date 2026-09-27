@@ -1031,7 +1031,80 @@ never auto-regenerated, because generation costs an LLM call.
   first if a script changed recently.
 ---
 
-## 13. Quick reference
+## 13. App status flags (live vs. dev copies vs. stale)
+
+Developers often duplicate an app (Qlik names the copy `My App(1)`, `My App(2)(1)`,
+…) and never delete it. Those copies add noise to the graph. Every scan now tags
+each app with a status taken from QRS metadata: publish state, last reload time,
+reload tasks and copy-name suffix.
+
+### 13.1 What each status means
+
+Rules are applied in this order:
+
+| Status | Meaning |
+| ------ | ------- |
+| `live` | Published to a stream, **or** has an enabled reload task and reloaded within `APP_STALE_DAYS`. |
+| `dev_copy` | Name ends in a copy suffix like `(1)`, or QRS says it was copied from another app, and it is not live. |
+| `stale` | Not reloaded within `APP_STALE_DAYS`, or never reloaded. |
+| `unscheduled` | Reloaded recently but has no enabled task and is not published, so it was probably reloaded by hand. |
+| `removed` | Still stored here but no longer returned by QRS, meaning it was deleted in Qlik. |
+
+`dev_copy`, `stale` and `removed` count as **noise**. A copy that is scheduled
+stays `live`. Each app also records a human-readable reason, plus
+`original_app_id`, which points to the unsuffixed original in its name family.
+
+Safety valve: if more than 20% (minimum 10) of the stored apps are missing from
+QRS, nothing is marked `removed`. That usually means a partial QRS response,
+not a real mass deletion.
+
+### 13.2 Where it shows up
+
+- **Graph / App Details / Impact Analysis:** noise apps are drawn dimmed with
+  a dashed border. The **"Hide dev copies & stale apps"** checkbox removes them.
+  The setting is remembered in the browser. The selected app itself is never
+  hidden.
+- **App Details:** shows a status banner, owner, last reload, reload tasks,
+  tags and file size. An *"Other versions of this app"* panel lists every copy.
+- **Agent:** knows the statuses and splits counts into live vs. noise.
+- **Neo4j:** each `App` node has these properties: `app_status`,
+  `status_reason`, `is_copy`, `original_app_id`, `published`,
+  `has_enabled_task`, `last_reload_at`.
+
+```cypher
+MATCH (a:App) WHERE a.app_status = 'live' RETURN a.name, a.last_reload_at LIMIT 25;
+MATCH (a:App) RETURN a.app_status, count(*) ORDER BY count(*) DESC;
+```
+
+### 13.3 Refreshing statuses and changing the threshold
+
+Statuses are refreshed on every scan, delta or full. Script hashes do not
+affect this, so no full rescan is needed. You can also refresh the statuses on
+their own, without parsing any scripts, in about 10 seconds:
+
+```powershell
+Invoke-RestMethod -Uri http://localhost:8000/scan/app-status -Method Post
+Invoke-RestMethod -Uri http://localhost:8000/apps/status-summary
+```
+
+The Graph page has a **"Refresh app status"** button that does the same thing.
+
+To change the stale threshold (default 90 days), edit `.env`, restart the
+backend, then refresh:
+
+```powershell
+# in .env
+APP_STALE_DAYS=180
+docker compose up -d backend
+Invoke-RestMethod -Uri http://localhost:8000/scan/app-status -Method Post
+```
+
+Flags are advisory only. Nothing is ever deleted from Qlik or from the
+lineage data.
+
+---
+
+## 14. Quick reference
 
 | Task | Command |
 | ---- | ------- |
@@ -1045,6 +1118,7 @@ never auto-regenerated, because generation costs an LLM call.
 | Ask the agent a question | see section 7 for the `Ask` helper and 20 example prompts |
 | Refresh lineage (delta) | see section 11.3 — safe to run often |
 | Automatic refresh | set `SCAN_INTERVAL_SECONDS` in `.env`, see section 11.4 |
+| Refresh app status flags | `Invoke-RestMethod -Uri http://localhost:8000/scan/app-status -Method Post` (section 13) |
 | Neo4j browser | <http://localhost:7474> (user `neo4j`, password `password`) |
 | Reclaim disk | `docker builder prune -af` |
 | **Never run** | `docker compose down -v` — deletes all data |

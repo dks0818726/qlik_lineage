@@ -76,6 +76,7 @@ def get_orchestrator() -> ScannerOrchestrator:
         parser=get_parser(),
         builder=get_builder(),
         max_concurrent_apps=settings.qlik_max_concurrent_apps,
+        stale_days=settings.app_stale_days,
     )
 
 

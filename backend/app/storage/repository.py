@@ -88,6 +88,92 @@ class PostgresRepository:
             cur.execute("SELECT * FROM apps WHERE app_id = %s", (app_id,))
             return cur.fetchone()
 
+    # -- app status flags -----------------------------------------------------
+    _STATUS_COLUMNS: ClassVar[tuple[tuple[str, str], ...]] = (
+        ("app_status", "text"), ("status_reason", "text"), ("base_name", "text"),
+        ("is_copy", "boolean"), ("original_app_id", "text"), ("created_at", "timestamptz"),
+        ("last_reload_at", "timestamptz"), ("published", "boolean"),
+        ("published_at", "timestamptz"), ("target_app_id", "text"), ("owner_name", "text"),
+        ("owner_user", "text"), ("modified_by", "text"), ("file_size", "bigint"),
+        ("tags", "jsonb"), ("task_count", "integer"), ("has_enabled_task", "boolean"),
+        ("last_task_status", "text"), ("last_task_run_at", "timestamptz"),
+    )
+
+    def update_app_statuses(self, statuses: Iterable[Any]) -> int:
+        """Write status flags onto existing app rows in one statement.
+
+        Only apps already in the table are updated. An app whose script could not be
+        fetched has no row yet, and inserting one here would make the next delta scan
+        think it had already been processed.
+        """
+        if psycopg is None:
+            return 0
+        rows = [s.to_dict() if hasattr(s, "to_dict") else dict(s) for s in statuses]
+        if not rows:
+            return 0
+        columns = ", ".join(f"{c} {t}" for c, t in self._STATUS_COLUMNS)
+        assignments = ", ".join(f"{c} = x.{c}" for c, _ in self._STATUS_COLUMNS)
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                f"UPDATE apps AS a SET {assignments}, status_updated_at = NOW() "
+                f"FROM jsonb_to_recordset(%s::jsonb) AS x(app_id text, {columns}) "
+                "WHERE a.app_id = x.app_id",
+                (json.dumps(rows, default=str),),
+            )
+            return cur.rowcount or 0
+
+    def mark_apps_removed(self, present_app_ids: Iterable[str], reason: str) -> list[str]:
+        """Flag stored apps that QRS no longer returns, and return their ids."""
+        if psycopg is None:
+            return []
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE apps SET app_status = 'removed', status_reason = %s, "
+                "has_enabled_task = FALSE, status_updated_at = NOW() "
+                "WHERE NOT (app_id = ANY(%s)) RETURNING app_id",
+                (reason, list(present_app_ids)),
+            )
+            return [row["app_id"] for row in cur.fetchall()]
+
+    def app_statuses(self, app_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
+        """Status summary for each of the given app ids, for annotating graph nodes."""
+        ids = [i for i in app_ids if i]
+        if psycopg is None or not ids:
+            return {}
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT app_id, app_status, status_reason, last_reload_at, published, "
+                "is_copy, original_app_id FROM apps "
+                "WHERE app_id = ANY(%s) AND app_status IS NOT NULL",
+                (ids,),
+            )
+            return {row.pop("app_id"): row for row in cur.fetchall()}
+
+    def app_family(self, app_id: str) -> list[dict[str, Any]]:
+        """Other apps with the same name once ``(n)`` suffixes are removed."""
+        if psycopg is None:
+            return []
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT o.app_id, o.name, o.app_status, o.status_reason, o.last_reload_at, "
+                "o.published, o.owner_name, o.owner_user "
+                "FROM apps a JOIN apps o ON o.base_name = a.base_name AND o.app_id <> a.app_id "
+                "WHERE a.app_id = %s AND a.base_name IS NOT NULL AND a.base_name <> '' "
+                "ORDER BY (o.app_status = 'live') DESC, o.last_reload_at DESC NULLS LAST, o.name",
+                (app_id,),
+            )
+            return cur.fetchall()
+
+    def app_status_counts(self) -> dict[str, int]:
+        if psycopg is None:
+            return {}
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT COALESCE(app_status, 'unknown') AS status, count(*) AS n "
+                "FROM apps GROUP BY 1"
+            )
+            return {row["status"]: int(row["n"]) for row in cur.fetchall()}
+
     # -- display names --------------------------------------------------------
     # Graph nodes carry only an `id`, so anything showing a graph to a human has to
     # resolve those ids back to names here. Apps are the important case: an app id is

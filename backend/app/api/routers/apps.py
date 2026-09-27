@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import PlainTextResponse
 
+from app.config import settings
 from app.dependencies import get_doc_generator, get_neo4j, get_repository
 from app.docs.generator import AmbiguousApp, AppNotFound
 
@@ -14,6 +15,13 @@ def list_apps(limit: int = 200) -> dict[str, object]:
     return {"count": len(rows), "apps": rows}
 
 
+@router.get("/status-summary")
+def status_summary() -> dict[str, object]:
+    """How many apps fall into each status, and the threshold used to decide it."""
+    return {"counts": get_repository().app_status_counts(),
+            "stale_days": settings.app_stale_days}
+
+
 @router.get("/{app_id}")
 def app_details(app_id: str) -> dict[str, object]:
     repo = get_repository()
@@ -22,8 +30,17 @@ def app_details(app_id: str) -> dict[str, object]:
         raise HTTPException(status_code=404, detail=f"App not found: {app_id}")
     script = repo.get_script(app_id)
     neo = get_neo4j()
+    original = repo.get_app(app["original_app_id"]) if app.get("original_app_id") else None
     return {
         "app": app,
+        # The app this one was copied from, and every other version of it, so the
+        # UI can point users at the live app when they land on a dev copy.
+        "original": (
+            {k: original.get(k) for k in ("app_id", "name", "app_status", "status_reason")}
+            if original else None
+        ),
+        "family": repo.app_family(app_id),
+        "stale_days": settings.app_stale_days,
         # Kept short so the details payload stays light - some scripts are megabytes.
         # The UI loads the rest on demand from /apps/{app_id}/script.
         "script_excerpt": (script or "")[:2000],

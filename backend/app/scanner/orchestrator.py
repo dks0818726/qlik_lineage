@@ -12,6 +12,7 @@ from app.lineage.builder import LineageBuilder
 from app.models.entities import GraphEdge, QlikApp, QlikTask, ScanObject
 from app.parser.qlik_parser import QlikScriptParser
 from app.realtime.events import event_bus, lineage_event
+from app.scanner.app_status import REMOVED, REMOVED_REASON, classify_apps
 from app.scanner.change_detector import detect_changes
 from app.storage.repository import PostgresRepository, script_hash
 
@@ -35,6 +36,7 @@ class ScannerOrchestrator:
     parser: QlikScriptParser
     builder: LineageBuilder
     max_concurrent_apps: int = 1
+    stale_days: int = 90
 
     def run(self, mode: str = "full") -> dict[str, Any]:
         if mode not in {"full", "delta"}:
@@ -54,7 +56,8 @@ class ScannerOrchestrator:
             # Auxiliary lookups are enrichment only. A slow, hanging, or
             # unavailable QRS endpoint (e.g. a very large /qrs/user/full dump)
             # must not abort the whole scan, so fetch each defensively.
-            tasks = self._safe_fetch("reloadtask", self.qrs.fetch_reload_tasks)
+            fetch_failures: set[str] = set()
+            tasks = self._safe_fetch("reloadtask", self.qrs.fetch_reload_tasks, fetch_failures)
             connections = self._safe_fetch("dataconnection", self.qrs.fetch_data_connections)
             owners = self._safe_fetch("user", self.qrs.fetch_owners)
             streams = self._safe_fetch("stream", self.qrs.fetch_streams)
@@ -138,6 +141,18 @@ class ScannerOrchestrator:
             stats["edges_upserted"] += self.repository.upsert_edges(task_edges)
             self.neo4j.upsert_edges(task_edges)
 
+            # Status depends on reload times and tasks, not on the script, so it is
+            # refreshed for every app, including those a delta scan skipped. Without
+            # the task list every scheduled app would look unscheduled, so the
+            # previous statuses are kept instead.
+            if "reloadtask" in fetch_failures:
+                logger.warning("Reload tasks unavailable; keeping previous app statuses")
+            else:
+                try:
+                    stats["app_status"] = self.sync_app_statuses(apps, tasks)["counts"]
+                except Exception:  # noqa: BLE001 - status flags are enrichment, never fatal
+                    logger.exception("App status classification failed; lineage is still valid")
+
             # Deleting apps and pruning stale edges can strand QVDs/tables with no
             # remaining lineage; drop them so counts reflect what is actually in use.
             try:
@@ -162,12 +177,60 @@ class ScannerOrchestrator:
 
         return {"scan_id": scan_id, "stats": stats}
 
+    # -- app status -------------------------------------------------------------
+    def sync_app_statuses(self, apps: list[dict[str, Any]],
+                          tasks: list[dict[str, Any]]) -> dict[str, Any]:
+        """Classify every app and store the result in Postgres and on the App nodes."""
+        statuses = classify_apps(apps, tasks, stale_days=self.stale_days)
+        counts: dict[str, int] = {}
+        for s in statuses:
+            counts[s.app_status] = counts.get(s.app_status, 0) + 1
+        rows = self.repository.update_app_statuses(statuses)
+        nodes = self.neo4j.set_app_statuses(statuses)
+
+        # Apps deleted in Qlik stay stored until the next scan removes them. Flag them
+        # so they are not shown without a status. The same safety valve as scan
+        # deletions applies: a partial QRS response must not mark real apps as removed.
+        present = {s.app_id for s in statuses}
+        stored = {row["app_id"] for row in self.repository.list_apps(limit=1_000_000)}
+        missing = stored - present
+        if apps and missing and len(missing) <= max(10, int(0.2 * len(stored))):
+            removed_ids = self.repository.mark_apps_removed(present, REMOVED_REASON)
+            self.neo4j.set_app_statuses(
+                {"app_id": i, "app_status": REMOVED, "status_reason": REMOVED_REASON}
+                for i in removed_ids
+            )
+            counts[REMOVED] = len(removed_ids)
+        elif missing:
+            logger.warning("%d stored apps missing from QRS; not marking them removed", len(missing))
+
+        logger.info("App status: %s (stale_days=%d, %d rows, %d graph nodes)",
+                    counts, self.stale_days, rows, nodes)
+        return {"counts": counts, "stale_days": self.stale_days,
+                "apps_classified": len(statuses), "rows_updated": rows,
+                "graph_nodes_updated": nodes}
+
+    def refresh_app_statuses(self) -> dict[str, Any]:
+        """Re-classify all apps from QRS without fetching or parsing any scripts.
+
+        Two QRS calls and no Engine work, so it takes seconds. Use it after changing
+        APP_STALE_DAYS or to refresh statuses between scans.
+        """
+        apps = self.qrs.fetch_apps()
+        # Without the task list every scheduled app would look unscheduled, so fail
+        # here rather than write wrong statuses.
+        tasks = self.qrs.fetch_reload_tasks()
+        return self.sync_app_statuses(apps, tasks)
+
     # -- helpers -------------------------------------------------------------
-    def _safe_fetch(self, label: str, fetch_fn) -> list[dict[str, Any]]:
+    def _safe_fetch(self, label: str, fetch_fn,
+                    failures: set[str] | None = None) -> list[dict[str, Any]]:
         try:
             return fetch_fn()
         except Exception as exc:  # noqa: BLE001 - continue scan without this lookup
             logger.warning("QRS %s fetch failed (%s); continuing without it", label, exc)
+            if failures is not None:
+                failures.add(label)
             return []
 
     def _sync_lookups(self, connections: list[dict[str, Any]],
