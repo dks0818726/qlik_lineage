@@ -1,7 +1,85 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { api, downloadMarkdown, downloadText, GraphEdgeView, GraphNode } from "../api";
+import { api, AppStatus, downloadMarkdown, downloadText, GraphEdgeView, GraphNode } from "../api";
 import { LineageGraph } from "../components/LineageGraph";
+import { AppStatusBadge, STATUS_META, relativeTime } from "../components/AppStatus";
+
+function Row({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <tr>
+      <td style={{ paddingRight: 16, verticalAlign: "top" }}>
+        <b>{label}</b>
+      </td>
+      <td>{children}</td>
+    </tr>
+  );
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;
+  return `${(n / 1024 ** 3).toFixed(2)} GB`;
+}
+
+/** Other apps with the same name once "(n)" suffixes are removed. */
+function FamilyPanel({ family, onOpen }: { family: any[]; onOpen: (id: string) => void }) {
+  const [expanded, setExpanded] = useState(false);
+  if (!family.length) return null;
+  const shown = expanded ? family : family.slice(0, 6);
+  return (
+    <div
+      style={{
+        border: "1px solid #e2e8f0",
+        borderRadius: 8,
+        padding: 12,
+        marginBottom: 16,
+        background: "#fff",
+      }}
+    >
+      <h3 style={{ margin: "0 0 4px", fontSize: 15 }}>
+        Other versions of this app ({family.length})
+      </h3>
+      <p style={{ margin: "0 0 8px", fontSize: 12, color: "#64748b" }}>
+        Apps with the same name apart from a copy suffix like "(1)". Usually one is live and the
+        rest are developer copies.
+      </p>
+      <table style={{ fontSize: 13, borderCollapse: "collapse", width: "100%" }}>
+        <tbody>
+          {shown.map((f) => (
+            <tr key={f.app_id} style={{ borderTop: "1px solid #f1f5f9" }}>
+              <td style={{ padding: "4px 8px 4px 0" }}>
+                <a
+                  href="#"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    onOpen(f.app_id);
+                  }}
+                >
+                  {f.name}
+                </a>
+              </td>
+              <td style={{ padding: "4px 8px" }}>
+                <AppStatusBadge status={f.app_status} reason={f.status_reason} />
+              </td>
+              <td style={{ padding: "4px 8px", color: "#64748b" }}>
+                reloaded {relativeTime(f.last_reload_at)}
+              </td>
+              <td style={{ padding: "4px 0 4px 8px", color: "#64748b" }}>
+                {f.owner_name || f.owner_user || ""}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {family.length > 6 && (
+        <button onClick={() => setExpanded((v) => !v)} style={{ marginTop: 8 }}>
+          {expanded ? "Show fewer" : `Show all ${family.length}`}
+        </button>
+      )}
+    </div>
+  );
+}
 
 function DocumentationPanel({ appId }: { appId: string }) {
   const [doc, setDoc] = useState<any>(null);
@@ -265,33 +343,109 @@ export function AppDetailsPage() {
   if (error) return <p style={{ color: "crimson" }}>{error}</p>;
   if (!details) return <p>Loading…</p>;
 
+  const app = details.app || {};
+  const statusMeta = app.app_status ? STATUS_META[app.app_status as AppStatus] : null;
+  const fmtDate = (iso?: string | null) =>
+    iso ? `${String(iso).slice(0, 10)} (${relativeTime(iso)})` : "—";
+
   return (
     <section>
-      <h2>App Details: {details.app?.name || appId}</h2>
+      <h2>
+        App Details: {app.name || appId}{" "}
+        <AppStatusBadge status={app.app_status} reason={app.status_reason} size="md" />
+      </h2>
+
+      {statusMeta && (
+        <div
+          style={{
+            border: `1px solid ${statusMeta.border}`,
+            background: statusMeta.bg,
+            color: "#0f172a",
+            borderRadius: 8,
+            padding: "10px 14px",
+            marginBottom: 16,
+            fontSize: 13,
+          }}
+        >
+          <strong style={{ color: statusMeta.color }}>{statusMeta.label}.</strong>{" "}
+          {app.status_reason || statusMeta.help}
+          {details.original && (
+            <div style={{ marginTop: 6 }}>
+              Copied from{" "}
+              <a
+                href="#"
+                onClick={(e) => {
+                  e.preventDefault();
+                  navigate(`/app/${encodeURIComponent(details.original.app_id)}`);
+                }}
+              >
+                {details.original.name}
+              </a>{" "}
+              <AppStatusBadge
+                status={details.original.app_status}
+                reason={details.original.status_reason}
+              />
+            </div>
+          )}
+          <div style={{ marginTop: 6, fontSize: 11, color: "#64748b" }}>
+            {statusMeta.help} Apps count as stale after {details.stale_days ?? 90} days without a
+            reload.
+          </div>
+        </div>
+      )}
+
       <table style={{ marginBottom: 16 }}>
         <tbody>
-          <tr>
-            <td style={{ paddingRight: 16 }}><b>App ID</b></td>
-            <td>{details.app?.app_id}</td>
-          </tr>
-          <tr>
-            <td><b>Owner</b></td>
-            <td>{details.app?.owner_id || "—"}</td>
-          </tr>
-          <tr>
-            <td><b>Stream</b></td>
-            <td>{details.app?.stream_id || "—"}</td>
-          </tr>
-          <tr>
-            <td><b>Script hash</b></td>
-            <td style={{ fontFamily: "monospace" }}>{details.app?.script_hash || "—"}</td>
-          </tr>
-          <tr>
-            <td><b>Last modified</b></td>
-            <td>{details.app?.modified_at || "—"}</td>
-          </tr>
+          <Row label="App ID">{app.app_id}</Row>
+          <Row label="Owner">
+            {app.owner_name
+              ? `${app.owner_name}${app.owner_user ? ` (${app.owner_user})` : ""}`
+              : app.owner_id || "—"}
+          </Row>
+          <Row label="Published">
+            {app.published === null || app.published === undefined
+              ? app.stream_id
+                ? "Yes"
+                : "—"
+              : app.published
+                ? `Yes${app.published_at ? `, ${fmtDate(app.published_at)}` : ""}`
+                : "No"}
+          </Row>
+          <Row label="Stream">{app.stream_id || "—"}</Row>
+          <Row label="Last reload">{app.app_status ? fmtDate(app.last_reload_at) : "—"}</Row>
+          <Row label="Reload tasks">
+            {app.task_count === null || app.task_count === undefined
+              ? "—"
+              : app.task_count === 0
+                ? "None"
+                : `${app.task_count} task${app.task_count === 1 ? "" : "s"}, ${
+                    app.has_enabled_task ? "enabled" : "all disabled"
+                  }${
+                    app.last_task_status
+                      ? ` · last run ${app.last_task_status}${
+                          app.last_task_run_at ? ` ${relativeTime(app.last_task_run_at)}` : ""
+                        }`
+                      : ""
+                  }`}
+          </Row>
+          <Row label="Created">{fmtDate(app.created_at)}</Row>
+          <Row label="Last modified">
+            {app.modified_at || "—"}
+            {app.modified_by ? ` by ${app.modified_by}` : ""}
+          </Row>
+          {Array.isArray(app.tags) && app.tags.length > 0 && (
+            <Row label="Tags">{app.tags.join(", ")}</Row>
+          )}
+          {typeof app.file_size === "number" && (
+            <Row label="File size">{formatBytes(app.file_size)}</Row>
+          )}
+          <Row label="Script hash">
+            <span style={{ fontFamily: "monospace" }}>{app.script_hash || "—"}</span>
+          </Row>
         </tbody>
       </table>
+
+      <FamilyPanel family={details.family || []} onOpen={(id) => navigate(`/app/${encodeURIComponent(id)}`)} />
 
       <div
         style={{

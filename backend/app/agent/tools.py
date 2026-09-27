@@ -185,7 +185,7 @@ class AgentTools:
     def search_apps(self, query: str) -> list[dict[str, Any]]:
         if self.repository is None:
             return [{"type": "App", "id": "SalesDashboard", "match": query}]
-        return self.repository.search_nodes(query, type_filter="App")
+        return self._with_app_status(self.repository.search_nodes(query, type_filter="App"))
 
     def search_qvds(self, query: str) -> list[dict[str, Any]]:
         if self.repository is None:
@@ -221,7 +221,24 @@ class AgentTools:
     def impact(self, node_type: str, node_id: str, depth: int = 5) -> list[dict[str, Any]]:
         if self.neo4j is None:
             return []
-        return self.neo4j.impact_scope(node_type, node_id, depth)
+        return self._with_app_status(self.neo4j.impact_scope(node_type, node_id, depth))
+
+    def _with_app_status(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Tag App rows with their status so answers can separate live apps from noise."""
+        if self.repository is None:
+            return rows
+        ids = [r.get("id") for r in rows if r.get("type") == "App"]
+        try:
+            statuses = self.repository.app_statuses(ids) if ids else {}
+        except Exception:  # noqa: BLE001 - status is enrichment; never fail the tool
+            logger.warning("App status lookup failed", exc_info=True)
+            return rows
+        for row in rows:
+            status = statuses.get(row.get("id")) if row.get("type") == "App" else None
+            if status:
+                row["app_status"] = status.get("app_status")
+                row["status_reason"] = status.get("status_reason")
+        return rows
 
     def run_cypher(self, statement: str) -> list[dict[str, Any]]:
         if self.neo4j is None:

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { Network } from "vis-network/standalone";
 import { DataSet } from "vis-data/standalone";
 import type { GraphEdgeView, GraphNode } from "../api";
+import { STATUS_META, StatusCounts, isNoise, relativeTime, useHideNoise } from "./AppStatus";
 
 const COLORS: Record<string, string> = {
   App: "#2563eb",
@@ -71,9 +72,55 @@ function computeLevels(
   return levels;
 }
 
+/** Drop dev-copy/stale apps, then anything that only connected through them.
+ *
+ * Removing an app alone would leave its QVDs floating unconnected, so after the
+ * filter only nodes still reachable from the root (in either direction) are kept.
+ * The root itself is never hidden, even when it is a dev copy.
+ */
+function withoutNoise(
+  nodes: GraphNode[],
+  edges: GraphEdgeView[],
+  rootKey: string,
+): { nodes: GraphNode[]; edges: GraphEdgeView[] } {
+  const hidden = new Set(
+    nodes
+      .filter((n) => n.type === "App" && isNoise(n.app_status) && key(n.type, n.id) !== rootKey)
+      .map((n) => key(n.type, n.id)),
+  );
+  if (hidden.size === 0) return { nodes, edges };
+
+  const kept = edges.filter(
+    (e) => !hidden.has(key(e.source_type, e.source)) && !hidden.has(key(e.target_type, e.target)),
+  );
+  const adjacency = new Map<string, string[]>();
+  for (const e of kept) {
+    const a = key(e.source_type, e.source);
+    const b = key(e.target_type, e.target);
+    if (!adjacency.has(a)) adjacency.set(a, []);
+    if (!adjacency.has(b)) adjacency.set(b, []);
+    adjacency.get(a)!.push(b);
+    adjacency.get(b)!.push(a);
+  }
+  const reachable = new Set<string>([rootKey]);
+  const queue = [rootKey];
+  while (queue.length) {
+    for (const next of adjacency.get(queue.shift()!) ?? []) {
+      if (!reachable.has(next)) {
+        reachable.add(next);
+        queue.push(next);
+      }
+    }
+  }
+  return {
+    nodes: nodes.filter((n) => reachable.has(key(n.type, n.id))),
+    edges: kept.filter((e) => reachable.has(key(e.source_type, e.source))),
+  };
+}
+
 export function LineageGraph({
-  nodes,
-  edges,
+  nodes: allNodes,
+  edges: allEdges,
   height = 560,
   rootKey,
   onNodeClick,
@@ -90,8 +137,28 @@ export function LineageGraph({
   // Held in a ref so a new inline callback from the parent does not rebuild the graph.
   const clickRef = useRef(onNodeClick);
   clickRef.current = onNodeClick;
+  const [hideNoise, setHideNoise] = useHideNoise();
 
-  const resolvedRoot = rootKey ?? key(nodes[0]?.type ?? "", nodes[0]?.id ?? "");
+  const resolvedRoot = rootKey ?? key(allNodes[0]?.type ?? "", allNodes[0]?.id ?? "");
+
+  const statusCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const n of allNodes) {
+      if (n.type === "App" && n.app_status) counts[n.app_status] = (counts[n.app_status] ?? 0) + 1;
+    }
+    return counts;
+  }, [allNodes]);
+  const noiseCount = (statusCounts.dev_copy ?? 0) + (statusCounts.stale ?? 0) + (statusCounts.removed ?? 0);
+
+  const { nodes, edges } = useMemo(
+    () =>
+      hideNoise
+        ? withoutNoise(allNodes, allEdges, resolvedRoot)
+        : { nodes: allNodes, edges: allEdges },
+    [allNodes, allEdges, resolvedRoot, hideNoise],
+  );
+  const hiddenCount = allNodes.length - nodes.length;
+
   const levels = useMemo(
     () => computeLevels(nodes, edges, resolvedRoot),
     [nodes, edges, resolvedRoot],
@@ -104,17 +171,32 @@ export function LineageGraph({
       nodes.map((n) => {
         const k = key(n.type, n.id);
         const isRoot = k === resolvedRoot;
+        const status = n.type === "App" && n.app_status ? STATUS_META[n.app_status] : undefined;
+        const dim = n.type === "App" && isNoise(n.app_status);
+        const typeLine = status ? `${n.type} · ${status.label}` : n.type;
+        const tooltip = [
+          n.name || n.id,
+          `${n.type} · ${n.id}`,
+          status ? `Status: ${status.label}${n.status_reason ? ` — ${n.status_reason}` : ""}` : "",
+          n.type === "App" && n.app_status ? `Last reload: ${relativeTime(n.last_reload_at)}` : "",
+        ]
+          .filter(Boolean)
+          .join("\n");
         return {
           id: k,
-          label: `${shorten(n.name || n.id)}\n(${n.type})`,
-          title: `${n.name || n.id}\n${n.type} · ${n.id}`,
+          label: `${shorten(n.name || n.id)}\n(${typeLine})`,
+          title: tooltip,
           level: levels.get(k) ?? 0,
           color: {
             background: COLORS[n.type] || "#64748b",
-            border: isRoot ? "#0f172a" : "#1e293b",
+            border: isRoot ? "#0f172a" : status && dim ? status.color : "#1e293b",
             highlight: { background: COLORS[n.type] || "#64748b", border: "#0f172a" },
           },
-          borderWidth: isRoot ? 4 : 1,
+          // Dev copies and stale apps stay on the graph but visibly recede, so the
+          // live lineage reads first without hiding anything by default.
+          opacity: dim && !isRoot ? 0.4 : 1,
+          shapeProperties: { borderDashes: dim ? [6, 4] : false },
+          borderWidth: isRoot ? 4 : dim ? 2 : 1,
           font: { color: "#fff", size: isRoot ? 15 : 12 },
           shape: "box",
           margin: { top: 8, right: 10, bottom: 8, left: 10 },
@@ -177,32 +259,68 @@ export function LineageGraph({
 
   return (
     <div style={{ position: "relative" }}>
-      <div
-        ref={ref}
-        style={{
-          width: "100%",
-          height,
-          border: "1px solid #e2e8f0",
-          borderRadius: 8,
-          background: "#fff",
-        }}
-      />
-      <button
-        onClick={() => networkRef.current?.fit({ animation: true })}
-        style={{
-          position: "absolute",
-          top: 10,
-          right: 10,
-          padding: "5px 10px",
-          fontSize: 12,
-          borderRadius: 6,
-          border: "1px solid #cbd5e1",
-          background: "#fff",
-          cursor: "pointer",
-        }}
-      >
-        Fit to view
-      </button>
+      {Object.keys(statusCounts).length > 0 && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 14,
+            flexWrap: "wrap",
+            marginBottom: 6,
+            fontSize: 12,
+            color: "#475569",
+          }}
+        >
+          <span style={{ fontWeight: 600 }}>Apps in view:</span>
+          <StatusCounts counts={statusCounts} />
+          {noiseCount > 0 && (
+            <label
+              style={{ display: "inline-flex", alignItems: "center", gap: 5, cursor: "pointer", marginLeft: "auto" }}
+              title="Dev copies are duplicates like 'App(1)' that are not published or scheduled. Stale apps have not reloaded recently. Your choice is remembered."
+            >
+              <input
+                type="checkbox"
+                checked={hideNoise}
+                onChange={(e) => setHideNoise(e.target.checked)}
+              />
+              Hide dev copies &amp; stale apps
+              {hideNoise && hiddenCount > 0 && (
+                <span style={{ color: "#94a3b8" }}>
+                  ({hiddenCount} node{hiddenCount === 1 ? "" : "s"} hidden)
+                </span>
+              )}
+            </label>
+          )}
+        </div>
+      )}
+      <div style={{ position: "relative" }}>
+        <div
+          ref={ref}
+          style={{
+            width: "100%",
+            height,
+            border: "1px solid #e2e8f0",
+            borderRadius: 8,
+            background: "#fff",
+          }}
+        />
+        <button
+          onClick={() => networkRef.current?.fit({ animation: true })}
+          style={{
+            position: "absolute",
+            top: 10,
+            right: 10,
+            padding: "5px 10px",
+            fontSize: 12,
+            borderRadius: 6,
+            border: "1px solid #cbd5e1",
+            background: "#fff",
+            cursor: "pointer",
+          }}
+        >
+          Fit to view
+        </button>
+      </div>
     </div>
   );
 }

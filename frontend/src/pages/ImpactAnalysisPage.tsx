@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api, ImpactCandidate, ImpactChainNode, ImpactReport, SearchResult } from "../api";
+import { AppStatusBadge, StatusCounts, isNoise, useHideNoise } from "../components/AppStatus";
 
 const TYPES = ["App", "QVD", "Table", "Connection", "Task"];
 
@@ -33,6 +34,7 @@ export function ImpactAnalysisPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const boxRef = useRef<HTMLDivElement | null>(null);
+  const [hideNoise, setHideNoise] = useHideNoise();
 
   async function run(ref: string = query) {
     if (!ref.trim()) {
@@ -213,7 +215,8 @@ export function ImpactAnalysisPage() {
             <div>
               <div style={{ fontSize: 12, color: "#64748b" }}>Analyzing {report.node!.type}</div>
               <div style={{ fontSize: 17, fontWeight: 700, color: "#0f172a" }}>
-                {report.node!.name}
+                {report.node!.name}{" "}
+                <AppStatusBadge status={report.node!.app_status} reason={report.node!.status_reason} />
               </div>
               <div style={{ fontSize: 11, color: "#94a3b8", fontFamily: "monospace" }}>
                 {report.node!.id}
@@ -253,6 +256,39 @@ export function ImpactAnalysisPage() {
                 )}
               </div>
 
+              {/* "Impacts 40 apps" means something very different when 30 are abandoned
+                  copies, so the split is shown up front. */}
+              {report.summary.app_status && Object.keys(report.summary.app_status).length > 0 && (
+                <div
+                  style={{
+                    display: "flex",
+                    gap: 14,
+                    alignItems: "center",
+                    flexWrap: "wrap",
+                    fontSize: 12,
+                    color: "#475569",
+                    marginBottom: 12,
+                  }}
+                >
+                  <span style={{ fontWeight: 600 }}>Impacted apps by status:</span>
+                  <StatusCounts counts={report.summary.app_status} />
+                  {!!(
+                    report.summary.app_status.dev_copy ||
+                    report.summary.app_status.stale ||
+                    report.summary.app_status.removed
+                  ) && (
+                    <label style={{ display: "inline-flex", gap: 5, alignItems: "center", cursor: "pointer" }}>
+                      <input
+                        type="checkbox"
+                        checked={hideNoise}
+                        onChange={(e) => setHideNoise(e.target.checked)}
+                      />
+                      Hide dev copies &amp; stale apps from the list
+                    </label>
+                  )}
+                </div>
+              )}
+
               <div
                 style={{
                   display: "grid",
@@ -260,10 +296,16 @@ export function ImpactAnalysisPage() {
                   gap: 12,
                 }}
               >
-                {impactedTypes.map((t) => (
+                {impactedTypes.map((t) => {
+                  const items = report.impacted![t].filter(
+                    (item) => !(hideNoise && t === "App" && isNoise(item.app_status)),
+                  );
+                  const hidden = report.impacted![t].length - items.length;
+                  return (
                   <div key={t} style={card}>
                     <h3 style={{ margin: "0 0 8px", fontSize: 14, color: TYPE_COLORS[t] || "#334155" }}>
-                      {t} ({report.impacted![t].length})
+                      {t} ({items.length}
+                      {hidden > 0 ? ` shown, ${hidden} hidden` : ""})
                     </h3>
                     <ul
                       style={{
@@ -274,14 +316,22 @@ export function ImpactAnalysisPage() {
                         overflowY: "auto",
                       }}
                     >
-                      {report.impacted![t].map((item) => (
-                        <li key={item.id} title={item.id} style={{ marginBottom: 3 }}>
-                          {item.name}
+                      {items.map((item) => (
+                        <li
+                          key={item.id}
+                          title={item.status_reason ? `${item.id}\n${item.status_reason}` : item.id}
+                          style={{ marginBottom: 3, opacity: isNoise(item.app_status) ? 0.6 : 1 }}
+                        >
+                          {item.name}{" "}
+                          {t === "App" && item.app_status && item.app_status !== "live" && (
+                            <AppStatusBadge status={item.app_status} reason={item.status_reason} />
+                          )}
                         </li>
                       ))}
                     </ul>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             </>
           )}

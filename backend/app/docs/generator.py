@@ -18,9 +18,12 @@ tokens.
 from __future__ import annotations
 
 import logging
+import random
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 
@@ -29,9 +32,12 @@ from app.docs.diagram import render_diagram
 from app.docs.evidence import EvidencePack, build_pack
 
 try:
-    from litellm import completion
+    from litellm import RateLimitError, completion
 except Exception:  # pragma: no cover - litellm optional at import time
     completion = None
+
+    class RateLimitError(Exception):
+        pass
 
 logger = logging.getLogger(__name__)
 
@@ -307,20 +313,84 @@ class DocumentationGenerator:
             }
         return kwargs
 
+    @staticmethod
+    def _retry_after_seconds(exc: RateLimitError) -> float | None:
+        response = getattr(exc, "response", None)
+        headers = getattr(response, "headers", None)
+        if not headers:
+            return None
+
+        for name in ("x-ms-retry-after-ms", "retry-after-ms"):
+            value = headers.get(name)
+            if value is not None:
+                try:
+                    return max(0.0, float(value) / 1000.0)
+                except (TypeError, ValueError):
+                    logger.warning("Ignoring invalid %s header: %r", name, value)
+
+        value = headers.get("retry-after")
+        if value is None:
+            return None
+        try:
+            return max(0.0, float(value))
+        except (TypeError, ValueError):
+            try:
+                retry_at = parsedate_to_datetime(value)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                now = datetime.now(retry_at.tzinfo)
+                return max(0.0, (retry_at - now).total_seconds())
+            except (TypeError, ValueError, OverflowError):
+                logger.warning("Ignoring invalid Retry-After header: %r", value)
+                return None
+
+    def _retry_delay(self, exc: RateLimitError, retry_number: int) -> float:
+        max_delay = max(0.0, settings.docgen_retry_max_seconds)
+        provider_delay = self._retry_after_seconds(exc)
+        if provider_delay is not None:
+            return provider_delay
+
+        base = max(0.0, settings.docgen_retry_base_seconds)
+        exponential = min(base * (2 ** (retry_number - 1)), max_delay)
+        return random.uniform(exponential / 2.0, exponential)
+
     def _call_model(self, pack: EvidencePack, model: str) -> str:
         if completion is None:
             raise RuntimeError("litellm is not installed; cannot generate documentation")
         prompt = DOCGEN_PROMPT.format(
             placeholder=DIAGRAM_PLACEHOLDER, evidence=pack.text
         )
-        resp = completion(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=settings.docgen_max_output_tokens,
-            temperature=0.2,
-            **self._completion_kwargs(model),
-        )
-        return (resp.choices[0].message.content or "").strip()
+        max_retries = max(0, settings.docgen_max_retries)
+        for attempt in range(max_retries + 1):
+            try:
+                resp = completion(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=settings.docgen_max_output_tokens,
+                    temperature=0.2,
+                    num_retries=0,
+                    **self._completion_kwargs(model),
+                )
+                return (resp.choices[0].message.content or "").strip()
+            except RateLimitError as exc:
+                if attempt >= max_retries:
+                    logger.error(
+                        "Documentation generation rate-limited after %d attempts",
+                        attempt + 1,
+                    )
+                    raise
+                retry_number = attempt + 1
+                delay = self._retry_delay(exc, retry_number)
+                logger.warning(
+                    "Documentation generation rate-limited; retrying in %.2fs "
+                    "(retry %d/%d)",
+                    delay,
+                    retry_number,
+                    max_retries,
+                )
+                time.sleep(delay)
+
+        raise RuntimeError("Documentation generation retry loop exited unexpectedly")
 
     @staticmethod
     def _strip_leading_title(body: str) -> str:

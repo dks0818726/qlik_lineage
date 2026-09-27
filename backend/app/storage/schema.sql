@@ -8,6 +8,33 @@ CREATE TABLE IF NOT EXISTS apps (
     updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
+-- App status flags (see app/scanner/app_status.py). Added with ALTER so existing
+-- databases pick them up on the next start without losing data. All nullable:
+-- they stay empty until the next scan or POST /scan/app-status fills them in.
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS app_status TEXT;          -- live | dev_copy | stale | unscheduled
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS status_reason TEXT;
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS status_updated_at TIMESTAMPTZ;
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS base_name TEXT;           -- name without "(n)" suffixes
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS is_copy BOOLEAN;
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS original_app_id TEXT;
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ;
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS last_reload_at TIMESTAMPTZ;
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS published BOOLEAN;
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ;
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS target_app_id TEXT;
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS owner_name TEXT;
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS owner_user TEXT;
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS modified_by TEXT;
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS file_size BIGINT;
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS tags JSONB;
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS task_count INTEGER;
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS has_enabled_task BOOLEAN;
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS last_task_status TEXT;
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS last_task_run_at TIMESTAMPTZ;
+
+CREATE INDEX IF NOT EXISTS idx_apps_status ON apps (app_status);
+CREATE INDEX IF NOT EXISTS idx_apps_base_name ON apps (base_name);
+
 CREATE TABLE IF NOT EXISTS streams (
     stream_id TEXT PRIMARY KEY,
     name TEXT NOT NULL

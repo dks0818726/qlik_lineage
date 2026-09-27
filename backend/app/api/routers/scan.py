@@ -39,3 +39,16 @@ def reparse(payload: ReparseRequest | None = None) -> dict[str, object]:
     """
     body = payload or ReparseRequest()
     return get_orchestrator().reparse_stored_scripts(body.app_ids)
+
+
+@router.post("/app-status")
+def refresh_app_status() -> dict[str, object]:
+    """Re-classify every app (live / dev copy / stale / unscheduled) from QRS.
+
+    Only app and reload-task metadata is fetched; no scripts are loaded or parsed,
+    so this takes seconds. Run it after changing APP_STALE_DAYS.
+    """
+    try:
+        return get_orchestrator().refresh_app_statuses()
+    except Exception as exc:  # noqa: BLE001 - surface QRS failures to the caller
+        raise HTTPException(502, f"Could not refresh app status from QRS: {exc}") from exc

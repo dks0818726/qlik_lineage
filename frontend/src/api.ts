@@ -26,6 +26,20 @@ export interface GraphNode {
   name?: string;
   /** Where the node sits relative to the selected node. */
   direction?: "root" | "upstream" | "downstream";
+  /** App nodes only: live / dev_copy / stale / unscheduled. */
+  app_status?: AppStatus | null;
+  status_reason?: string | null;
+  last_reload_at?: string | null;
+}
+
+export type AppStatus = "live" | "dev_copy" | "stale" | "unscheduled" | "removed";
+
+export interface AppStatusRefresh {
+  counts: Record<string, number>;
+  stale_days: number;
+  apps_classified: number;
+  rows_updated: number;
+  graph_nodes_updated: number;
 }
 
 export interface LineageScope {
@@ -71,15 +85,20 @@ export interface ImpactReport {
   status: "ok" | "ambiguous" | "not_found";
   message?: string;
   candidates?: ImpactCandidate[];
-  node?: { type: string; id: string; name: string };
+  node?: { type: string; id: string; name: string; app_status?: AppStatus | null; status_reason?: string | null };
   summary?: {
     total_impacted: number;
     by_type: Record<string, number>;
     upstream_paths: number;
     downstream_paths: number;
     truncated: boolean;
+    /** Impacted apps split by status, e.g. { live: 12, dev_copy: 30 }. */
+    app_status?: Record<string, number>;
   };
-  impacted?: Record<string, { id: string; name: string }[]>;
+  impacted?: Record<
+    string,
+    { id: string; name: string; app_status?: AppStatus | null; status_reason?: string | null }[]
+  >;
   upstream?: { depth: number; chain: ImpactChainNode[] }[];
   downstream?: { depth: number; chain: ImpactChainNode[] }[];
 }
@@ -124,6 +143,8 @@ export const api = {
     request<any>(`/agent/ask`, { method: "POST", body: JSON.stringify({ question }) }),
   scan: (mode: "full" | "delta") =>
     request<any>(`/scan/run`, { method: "POST", body: JSON.stringify({ mode }) }),
+  /** Re-classify every app from QRS in seconds, without re-reading any scripts. */
+  refreshAppStatus: () => request<AppStatusRefresh>(`/scan/app-status`, { method: "POST" }),
 
   generateDocumentation: (appRef: string) =>
     request<DocumentationReceipt>(
