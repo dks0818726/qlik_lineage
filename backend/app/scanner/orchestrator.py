@@ -58,6 +58,9 @@ class ScannerOrchestrator:
             # must not abort the whole scan, so fetch each defensively.
             fetch_failures: set[str] = set()
             tasks = self._safe_fetch("reloadtask", self.qrs.fetch_reload_tasks, fetch_failures)
+            composite_events = self._safe_fetch(
+                "compositeevent", self.qrs.fetch_task_dependencies, fetch_failures
+            )
             connections = self._safe_fetch("dataconnection", self.qrs.fetch_data_connections)
             owners = self._safe_fetch("user", self.qrs.fetch_owners)
             streams = self._safe_fetch("stream", self.qrs.fetch_streams)
@@ -141,6 +144,18 @@ class ScannerOrchestrator:
             stats["edges_upserted"] += self.repository.upsert_edges(task_edges)
             self.neo4j.upsert_edges(task_edges)
 
+            # Task chains (task B starts when task A finishes) are stored as structure
+            # only; run status is always read live by the agent, never persisted.
+            # A failed fetch would look like "every chain was deleted", so the stored
+            # chains are only replaced when both lookups succeeded.
+            if fetch_failures & {"reloadtask", "compositeevent"}:
+                logger.warning("Task chain lookup unavailable; keeping previous TRIGGERS edges")
+            else:
+                try:
+                    stats["task_chains"] = self._sync_task_chains(composite_events, tasks)
+                except Exception:  # noqa: BLE001 - chains are enrichment, never fatal
+                    logger.exception("Task chain sync failed; lineage is still valid")
+
             # Status depends on reload times and tasks, not on the script, so it is
             # refreshed for every app, including those a delta scan skipped. Without
             # the task list every scheduled app would look unscheduled, so the
@@ -176,6 +191,15 @@ class ScannerOrchestrator:
             raise
 
         return {"scan_id": scan_id, "stats": stats}
+
+    # -- task chains ------------------------------------------------------------
+    def _sync_task_chains(self, composite_events: list[dict[str, Any]],
+                          tasks: list[dict[str, Any]]) -> int:
+        known = {t.get("id") for t in tasks if t.get("id")}
+        edges = self.builder.build_task_chain_edges(composite_events, known)
+        stored = self.repository.replace_relation_edges("TRIGGERS", edges)
+        self.neo4j.replace_relation("TRIGGERS", edges)
+        return stored
 
     # -- app status -------------------------------------------------------------
     def sync_app_statuses(self, apps: list[dict[str, Any]],

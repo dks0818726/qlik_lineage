@@ -25,6 +25,7 @@ class RelationType(str, Enum):
     OWNS = "OWNS"
     BELONGS_TO = "BELONGS_TO"
     SCHEDULED_BY = "SCHEDULED_BY"
+    TRIGGERS = "TRIGGERS"
 
 
 @dataclass(frozen=True)

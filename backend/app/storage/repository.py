@@ -420,6 +420,29 @@ class PostgresRepository:
                 count += 1
         return count
 
+    def replace_relation_edges(self, relation: str, edges: Iterable[GraphEdge]) -> int:
+        """Atomically replace every stored edge of ``relation`` with ``edges``."""
+        if psycopg is None:
+            return 0
+        rows = [
+            (e.source_type, e.source_id, e.relation, e.target_type, e.target_id,
+             json.dumps(e.attributes or {}))
+            for e in edges if e.relation == relation
+        ]
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM lineage_edges WHERE relation = %s;", (relation,))
+            if rows:
+                cur.executemany(
+                    """
+                    INSERT INTO lineage_edges (source_type, source_id, relation, target_type, target_id, attributes)
+                    VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+                    ON CONFLICT (source_type, source_id, relation, target_type, target_id) DO UPDATE
+                    SET attributes = EXCLUDED.attributes, updated_at = NOW();
+                    """,
+                    rows,
+                )
+        return len(rows)
+
     def delete_app_edges(self, app_id: str, relations: Iterable[str] | None = None) -> int:
         """Remove the lineage edges this app is an endpoint of.
 

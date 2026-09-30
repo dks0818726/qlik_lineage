@@ -11,6 +11,8 @@ const SUGGESTIONS = [
   "Show downstream dependencies for NightlyReload task.",
   "Show upstream dependencies for Sales Dashboard.",
   "Document the ISS Extract Archive app.",
+  "Which tasks failed in the last 24 hours?",
+  "What tasks are running right now?",
 ];
 
 export function ChatPage() {

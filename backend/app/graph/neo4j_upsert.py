@@ -6,7 +6,8 @@ from app.models.entities import GraphEdge
 
 
 NODE_TYPES = ("App", "QVD", "Table", "Connection", "Task", "Owner", "Stream", "Schedule")
-REL_TYPES = ("READS", "WRITES", "USES", "RUNS", "DEPENDS_ON", "OWNS", "BELONGS_TO", "SCHEDULED_BY")
+REL_TYPES = ("READS", "WRITES", "USES", "RUNS", "DEPENDS_ON", "OWNS", "BELONGS_TO", "SCHEDULED_BY",
+             "TRIGGERS")
 
 
 def constraint_queries() -> list[str]:

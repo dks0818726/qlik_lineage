@@ -3,6 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
+from app.agent.live_tasks import LiveTaskMonitor
 from app.agent.tools import AgentTools
 from app.agent.workflow import LineageCopilotAgent
 from app.config import settings
@@ -81,12 +82,24 @@ def get_orchestrator() -> ScannerOrchestrator:
 
 
 @lru_cache
+def get_live_tasks() -> LiveTaskMonitor | None:
+    if not settings.qlik_live_tasks_enabled:
+        return None
+    return LiveTaskMonitor(
+        qrs=get_qrs(),
+        repository=get_repository(),
+        cache_seconds=settings.qlik_live_cache_seconds,
+    )
+
+
+@lru_cache
 def get_agent() -> LineageCopilotAgent:
     return LineageCopilotAgent(
         tools=AgentTools(
             repository=get_repository(),
             neo4j=get_neo4j(),
             documentation=get_doc_generator(),
+            live_tasks=get_live_tasks(),
         )
     )
 
