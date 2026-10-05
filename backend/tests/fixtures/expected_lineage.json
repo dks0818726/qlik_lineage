@@ -24,7 +24,7 @@
       "app_id": "SalesDashboard",
       "connection": null,
       "source_table": null,
-      "output_qvd": "orders.qvd",
+      "output_qvd": "lib://qlikstorage/orders.qvd",
       "input_qvd": null,
       "resident_table": null,
       "include_file": null,
@@ -35,7 +35,7 @@
       "connection": null,
       "source_table": null,
       "output_qvd": null,
-      "input_qvd": "finance.qvd",
+      "input_qvd": "lib://qlikstorage/finance.qvd",
       "resident_table": null,
       "include_file": null,
       "statement": "LOAD * FROM [Finance.qvd];"
