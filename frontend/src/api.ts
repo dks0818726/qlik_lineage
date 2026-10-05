@@ -79,6 +79,8 @@ export interface ImpactChainNode {
   type: string;
   id: string;
   name: string;
+  app_status?: AppStatus | null;
+  status_reason?: string | null;
 }
 
 export interface ImpactReport {

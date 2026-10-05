@@ -93,6 +93,32 @@ export function ImpactAnalysisPage() {
 
   const impactedTypes = useMemo(() => Object.keys(report?.impacted || {}).sort(), [report]);
 
+  // The first node of every chain is the analyzed object itself, so only the apps
+  // after it decide whether a path runs through a dev copy or stale app.
+  const upstreamChains = report?.upstream || [];
+  const downstreamChains = report?.downstream || [];
+  const pathHasNoise = (c: { chain: ImpactChainNode[] }) =>
+    c.chain.slice(1).some((n) => n.type === "App" && isNoise(n.app_status));
+  const visibleUpstream = hideNoise ? upstreamChains.filter((c) => !pathHasNoise(c)) : upstreamChains;
+  const visibleDownstream = hideNoise
+    ? downstreamChains.filter((c) => !pathHasNoise(c))
+    : downstreamChains;
+  const hasNoise =
+    !!(
+      report?.summary?.app_status?.dev_copy ||
+      report?.summary?.app_status?.stale ||
+      report?.summary?.app_status?.removed
+    ) ||
+    upstreamChains.some(pathHasNoise) ||
+    downstreamChains.some(pathHasNoise);
+
+  const noiseToggle = (
+    <label style={{ display: "inline-flex", gap: 5, alignItems: "center", cursor: "pointer" }}>
+      <input type="checkbox" checked={hideNoise} onChange={(e) => setHideNoise(e.target.checked)} />
+      Hide dev copies &amp; stale apps from the lists and paths
+    </label>
+  );
+
   return (
     <section>
       <h2>Impact Analysis</h2>
@@ -272,20 +298,7 @@ export function ImpactAnalysisPage() {
                 >
                   <span style={{ fontWeight: 600 }}>Impacted apps by status:</span>
                   <StatusCounts counts={report.summary.app_status} />
-                  {!!(
-                    report.summary.app_status.dev_copy ||
-                    report.summary.app_status.stale ||
-                    report.summary.app_status.removed
-                  ) && (
-                    <label style={{ display: "inline-flex", gap: 5, alignItems: "center", cursor: "pointer" }}>
-                      <input
-                        type="checkbox"
-                        checked={hideNoise}
-                        onChange={(e) => setHideNoise(e.target.checked)}
-                      />
-                      Hide dev copies &amp; stale apps from the list
-                    </label>
-                  )}
+                  {hasNoise && noiseToggle}
                 </div>
               )}
 
@@ -336,9 +349,23 @@ export function ImpactAnalysisPage() {
             </>
           )}
 
+          {/* With nothing downstream the status row above is not rendered, but upstream
+              paths can still run through dev copies, so the toggle is offered here. */}
+          {report.summary.total_impacted === 0 && hasNoise && (
+            <div style={{ fontSize: 12, color: "#475569", marginTop: 12 }}>{noiseToggle}</div>
+          )}
+
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 12 }}>
-            <ChainPanel title="Upstream (what feeds it)" chains={report.upstream || []} />
-            <ChainPanel title="Downstream (what it feeds)" chains={report.downstream || []} />
+            <ChainPanel
+              title="Upstream (what feeds it)"
+              chains={visibleUpstream}
+              hidden={upstreamChains.length - visibleUpstream.length}
+            />
+            <ChainPanel
+              title="Downstream (what it feeds)"
+              chains={visibleDownstream}
+              hidden={downstreamChains.length - visibleDownstream.length}
+            />
           </div>
         </>
       )}
@@ -364,14 +391,17 @@ function Stat({ label, value, accent }: { label: string; value: number; accent: 
 function ChainPanel({
   title,
   chains,
+  hidden = 0,
 }: {
   title: string;
   chains: { depth: number; chain: ImpactChainNode[] }[];
+  hidden?: number;
 }) {
   return (
     <div style={card}>
       <h3 style={{ marginTop: 0, fontSize: 14 }}>
-        {title} ({chains.length})
+        {title} ({chains.length}
+        {hidden > 0 ? ` shown, ${hidden} hidden` : ""})
       </h3>
       <ul style={{ paddingLeft: 16, margin: 0, fontSize: 12, maxHeight: 260, overflowY: "auto" }}>
         {chains.length ? (
