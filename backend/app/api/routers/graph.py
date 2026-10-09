@@ -134,23 +134,28 @@ def _status_fields(status: dict[str, object]) -> dict[str, object]:
 
 
 def _named_chains(repo, chains: list[dict[str, object]]) -> list[dict[str, object]]:
-    """Attach display names to every node in a traversal chain."""
+    """Attach display names, and app status for apps, to every node in a traversal chain."""
     ids_by_type: dict[str, list[str]] = {}
     for row in chains:
         for node in row.get("chain") or []:
             ids_by_type.setdefault(node["type"], []).append(node["id"])
     names = repo.display_names(ids_by_type)
+    statuses = repo.app_statuses(set(ids_by_type.get("App", [])))
+
+    def _node(n: dict[str, object]) -> dict[str, object]:
+        item = {
+            "type": n["type"],
+            "id": n["id"],
+            "name": names.get(f"{n['type']}::{n['id']}") or n["id"],
+        }
+        if n["type"] == "App" and n["id"] in statuses:
+            item.update(_status_fields(statuses[n["id"]]))
+        return item
+
     return [
         {
             "depth": row.get("depth"),
-            "chain": [
-                {
-                    "type": n["type"],
-                    "id": n["id"],
-                    "name": names.get(f"{n['type']}::{n['id']}") or n["id"],
-                }
-                for n in (row.get("chain") or [])
-            ],
+            "chain": [_node(n) for n in (row.get("chain") or [])],
         }
         for row in chains
     ]

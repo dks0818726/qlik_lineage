@@ -86,6 +86,8 @@ VAR_REF_RE = re.compile(r"\$\(([^()$]*)\)")
 # `lib://<mount>/<rest>` — splits a Qlik lib path into its mount (data connection
 # or unresolved variable) and the path beneath it.
 LIB_MOUNT_RE = re.compile(r"^lib://([^/]*)/(.+)$", re.IGNORECASE)
+# Data connection that unresolved-mount and mount-less QVD paths are assigned to.
+DEFAULT_QVD_MOUNT = "lib://qlikstorage/"
 # Strip line comments but DO NOT eat the `//` inside `lib://...` URLs (negative lookbehind on `:`).
 LINE_COMMENT_RE = re.compile(r"(?m)(?<!:)//[^\n]*|(?<![\w-])--[^\n]*")
 
@@ -107,35 +109,45 @@ class QlikScriptParser:
     def canonical_qvd(path: str) -> str:
         """Canonical id for a QVD/file path: forward slashes, lower case.
 
-        QVDs whose mount is an *unresolved* variable are additionally collapsed
-        onto the path beneath the mount - see :meth:`_strip_unresolved_mount`.
+        QVDs with an *unresolved* variable mount or no mount at all are
+        additionally assigned to ``lib://qlikstorage/`` - see
+        :meth:`_normalize_qvd_mount`.
         """
         cleaned = path.strip().strip("[]\"'").replace("\\", "/").lower()
-        return QlikScriptParser._strip_unresolved_mount(cleaned)
+        return QlikScriptParser._normalize_qvd_mount(cleaned)
 
     @staticmethod
-    def _strip_unresolved_mount(path: str) -> str:
-        """Drop ``lib://<mount>/`` when the mount is an unresolved variable.
+    def _normalize_qvd_mount(path: str) -> str:
+        """Assign unresolved-mount and mount-less QVDs to ``lib://qlikstorage/``.
 
-        The same physical QVD is reached through many mount spellings
-        (``lib://$(vPath)/...``, ``lib://$(vServer)/...``, ``lib://$(vTargetServer)/...``).
-        Because those variables are defined outside the script we cannot resolve
-        them, so keeping them in the id splits one QVD into several nodes and
-        breaks the read/write chain between apps. Anything after the mount is the
-        stable part of the path, so that alone becomes the id.
+        The same physical QVD is reached through many spellings
+        (``lib://$(vPath)/...``, ``lib://$(vServer)/...``, or a bare relative
+        path), while producers typically write it as ``lib://qlikstorage/...``.
+        Keeping those spellings distinct splits one QVD into several nodes and
+        breaks the read/write chain between apps, so they share the
+        ``lib://qlikstorage/<suffix>`` id.
 
-        Mounts that are literal data connection names (``lib://qlikstorage/...``)
-        are left intact: they are real, distinguishable locations.
+        Other literal data connections (``lib://qlikstorage - prod/...``) are
+        real, distinguishable locations and are left intact, as are paths whose
+        location is itself an unresolved variable (``$(vDir)file.qvd``) or that
+        are absolute/malformed, since their suffix is not known.
         """
         if not path.endswith(".qvd"):
             return path
         match = LIB_MOUNT_RE.match(path)
-        if not match:
+        if match:
+            mount, remainder = match.group(1), match.group(2)
+            if "$" in mount and remainder:
+                return DEFAULT_QVD_MOUNT + remainder
             return path
-        mount, remainder = match.group(1), match.group(2)
-        if "$" not in mount or not remainder:
+        if (
+            "://" in path
+            or path.startswith(("/", "$("))
+            or re.match(r"^[a-z]:", path)
+        ):
             return path
-        return remainder
+        suffix = path[2:] if path.startswith("./") else path
+        return DEFAULT_QVD_MOUNT + suffix
 
     @staticmethod
     def canonical_table(name: str) -> str:

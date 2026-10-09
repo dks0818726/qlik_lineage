@@ -1104,7 +1104,60 @@ lineage data.
 
 ---
 
-## 14. Quick reference
+## 14. Live task status in Copilot Chat
+
+Copilot can answer questions about reload tasks from **live Qlik data**, read
+at the moment you ask:
+
+- "Which tasks failed in the last 24 hours?"
+- "What tasks are running right now?"
+- "When does the Reload Sales task run next, and what is its schedule?"
+- "Why did the Reload Sales task fail?" (last run result and error message)
+- "What runs in the next 3 hours?"
+- "If the Extract Finance task fails, what is impacted?" (live status + graph)
+
+### 14.1 What is stored and what is not
+
+| Kept in Postgres/Neo4j (refreshed by each scan) | Read live, never stored |
+| ---- | ---- |
+| Task names and ids | Last run result, times, duration and error messages |
+| `(Task)-[:RUNS]->(App)` | Whether a task is running now |
+| `(Task)-[:TRIGGERS {on}]->(Task)` task chains ("start B when A succeeds") | Next run time and schedule details |
+| | Recent run history |
+
+The `TRIGGERS` edges let impact analysis follow a chain:
+Task → TRIGGERS → Task → RUNS → App → WRITES → QVD. A chain removed in the
+QMC disappears on the next scan. If the QRS trigger lookup fails, the previous
+chains are kept rather than wiped.
+
+### 14.2 Guardrails
+
+- **Read-only.** The QRS client can only `GET` an allow-list of read endpoints;
+  start/stop/edit endpoints are unreachable. Asked to start, stop or change a
+  task, Copilot refuses and points to the QMC.
+- **No injection.** Task names are matched in Postgres; only validated task ids
+  and generated timestamps go into QRS filters. Ambiguous names return a list
+  of candidates to choose from.
+- **Bounded.** Failure look-back is capped at 1–168 hours, upcoming at 1–48
+  hours, and 25 rows per answer. Error messages are truncated to 300
+  characters with password/token values masked. Script log paths, server
+  nodes and user accounts are not passed to the model.
+- **Honest.** Answers quote an "as of" time. If Qlik cannot be reached the
+  answer says so instead of guessing.
+- **Light on QRS.** Identical reads within 30 seconds are served from memory.
+
+### 14.3 Settings
+
+```powershell
+# in .env
+QLIK_LIVE_TASKS_ENABLED=true   # false removes live answers; lineage is unaffected
+QLIK_LIVE_CACHE_SECONDS=30
+docker compose up -d backend
+```
+
+---
+
+## 15. Quick reference
 
 | Task | Command |
 | ---- | ------- |
@@ -1119,6 +1172,7 @@ lineage data.
 | Refresh lineage (delta) | see section 11.3 — safe to run often |
 | Automatic refresh | set `SCAN_INTERVAL_SECONDS` in `.env`, see section 11.4 |
 | Refresh app status flags | `Invoke-RestMethod -Uri http://localhost:8000/scan/app-status -Method Post` (section 13) |
+| Live task questions | ask Copilot Chat, e.g. "Which tasks failed in the last 24 hours?" (section 14) |
 | Neo4j browser | <http://localhost:7474> (user `neo4j`, password `password`) |
 | Reclaim disk | `docker builder prune -af` |
 | **Never run** | `docker compose down -v` — deletes all data |

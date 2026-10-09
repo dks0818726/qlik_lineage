@@ -45,9 +45,9 @@ class TestQlikScriptParserEdges(unittest.TestCase):
         """
         deps = self.parser.parse("app1", script)
         qvds = {d.output_qvd for d in deps if d.output_qvd}
-        self.assertEqual({"real.qvd"}, qvds)
-        self.assertNotIn("fake.qvd", qvds)
-        self.assertNotIn("fakeline.qvd", qvds)
+        self.assertEqual({"lib://qlikstorage/real.qvd"}, qvds)
+        self.assertNotIn("lib://qlikstorage/fake.qvd", qvds)
+        self.assertNotIn("lib://qlikstorage/fakeline.qvd", qvds)
 
     def test_lib_qvd_paths(self) -> None:
         script = """
@@ -223,19 +223,28 @@ class TestVariableExpansion(unittest.TestCase):
         paths = {d.input_qvd for d in deps if d.input_qvd}
         self.assertEqual({"lib://storage/snap_$(vtoday).qvd"}, paths)
 
-    def test_unresolved_mount_is_stripped_so_variants_aggregate(self) -> None:
-        """QVDs behind an unresolved variable mount collapse onto one node id.
-
-        The same physical QVD is written as lib://$(vPath)/..., lib://$(vServer)/...
-        etc. Keeping the mount would split it into several unconnected nodes.
-        """
+    def test_unresolved_and_missing_mounts_aggregate_to_qlikstorage(self) -> None:
+        """Variable-mount, mount-less and qlikstorage QVDs share one node id."""
         script = """
         LOAD * FROM [lib://$(vDefinedElsewhere)/ebir/extract/x.qvd];
         LOAD * FROM [lib://$(vOtherMount)/ebir/extract/x.qvd];
+        LOAD * FROM [ebir\\extract\\X.qvd];
+        LOAD * FROM [lib://QlikStorage/ebir/extract/x.qvd];
         """
         deps = self.parser.parse("app1", script)
         self.assertEqual(
-            {"ebir/extract/x.qvd"}, {d.input_qvd for d in deps if d.input_qvd}
+            {"lib://qlikstorage/ebir/extract/x.qvd"},
+            {d.input_qvd for d in deps if d.input_qvd},
+        )
+
+    def test_unknown_location_and_non_qvd_are_untouched(self) -> None:
+        self.assertEqual(
+            "$(vqvddirectory)/$(vqvdfile).qvd",
+            self.parser.canonical_qvd("$(vQvdDirectory)/$(vQvdFile).qvd"),
+        )
+        self.assertEqual(
+            "lib://$(vserver)/ebir/variables/x.xlsx",
+            self.parser.canonical_qvd("lib://$(vServer)/ebir/variables/x.xlsx"),
         )
 
     def test_literal_mount_is_preserved(self) -> None:

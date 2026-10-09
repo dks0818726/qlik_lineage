@@ -170,7 +170,64 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "live_task_status",
+            "description": (
+                "LIVE from Qlik: current state of one reload task - last run result and "
+                "error message, next scheduled run, whether it is running now, its "
+                "schedules (triggers), which tasks start it and which it starts, and the "
+                "last 5 runs. Accepts a task name or task id. Read-only."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"task": {"type": "string", "description": "Task name or task id."}},
+                "required": ["task"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "live_running_tasks",
+            "description": "LIVE from Qlik: reload tasks executing right now and how long they have run.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "live_task_failures",
+            "description": (
+                "LIVE from Qlik: tasks whose runs ended Aborted, FinishedFail or Error in "
+                "the last N hours (1-168), grouped per task with the latest error message."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"hours": {"type": "integer", "default": 24, "minimum": 1, "maximum": 168}},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "live_upcoming_tasks",
+            "description": "LIVE from Qlik: enabled tasks scheduled to run within the next N hours (1-48).",
+            "parameters": {
+                "type": "object",
+                "properties": {"hours": {"type": "integer", "default": 6, "minimum": 1, "maximum": 48}},
+            },
+        },
+    },
 ]
+
+_TOOL_NAMES = frozenset(t["function"]["name"] for t in TOOL_SCHEMAS)
+
+_LIVE_DISABLED = {
+    "status": "unavailable",
+    "message": "Live task status is disabled (QLIK_LIVE_TASKS_ENABLED=false).",
+}
 
 
 @dataclass
@@ -180,6 +237,7 @@ class AgentTools:
     repository: PostgresRepository | None = None
     neo4j: Neo4jClient | None = None
     documentation: Any = None
+    live_tasks: Any = None
 
     # -- search ---------------------------------------------------------------
     def search_apps(self, query: str) -> list[dict[str, Any]]:
@@ -287,9 +345,32 @@ class AgentTools:
             "evidence": result.evidence_label,
         }
 
+    # -- live task state (read from QRS at question time, never stored) --------
+    def live_task_status(self, task: str) -> dict[str, Any]:
+        if self.live_tasks is None:
+            return _LIVE_DISABLED
+        return self.live_tasks.task_status(task)
+
+    def live_running_tasks(self) -> dict[str, Any]:
+        if self.live_tasks is None:
+            return _LIVE_DISABLED
+        return self.live_tasks.running_tasks()
+
+    def live_task_failures(self, hours: int = 24) -> dict[str, Any]:
+        if self.live_tasks is None:
+            return _LIVE_DISABLED
+        return self.live_tasks.task_failures(hours)
+
+    def live_upcoming_tasks(self, hours: int = 6) -> dict[str, Any]:
+        if self.live_tasks is None:
+            return _LIVE_DISABLED
+        return self.live_tasks.upcoming_tasks(hours)
+
     # -- dispatch -------------------------------------------------------------
     def dispatch(self, name: str, arguments: dict[str, Any]) -> Any:
-        handler = getattr(self, name, None)
+        # Only advertised tools are callable: getattr alone would also expose
+        # helpers and attributes (e.g. `live_tasks`) to whatever name the LLM emits.
+        handler = getattr(self, name, None) if name in _TOOL_NAMES else None
         if handler is None or not callable(handler):
             raise ValueError(f"Unknown tool: {name}")
         return handler(**arguments)

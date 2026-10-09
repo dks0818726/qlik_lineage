@@ -66,6 +66,11 @@ class Settings(BaseSettings):
     # POST /scan/app-status re-classifies every app without a full rescan.
     app_stale_days: int = 90
 
+    # Copilot answers task status / schedule / running / failure questions from live
+    # QRS reads (never stored). The cache stops a chat burst from hammering QRS.
+    qlik_live_tasks_enabled: bool = True
+    qlik_live_cache_seconds: int = 30
+
     @property
     def effective_docgen_model(self) -> str:
         """Model used for documentation, falling back to the chat model if unset."""

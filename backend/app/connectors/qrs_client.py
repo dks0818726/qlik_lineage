@@ -8,6 +8,21 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+# The only QRS resources this client may read. QRS also exposes endpoints that
+# start, stop or modify tasks and apps (e.g. /qrs/task/{id}/start); an allow-list
+# makes it impossible for any caller - including agent tools - to reach them.
+READ_ONLY_RESOURCES = frozenset({
+    "/qrs/app/full",
+    "/qrs/stream/full",
+    "/qrs/reloadtask/full",
+    "/qrs/schemaevent/full",
+    "/qrs/compositeevent/full",
+    "/qrs/dataconnection/full",
+    "/qrs/user/full",
+    "/qrs/executionresult/full",
+    "/qrs/executionsession/full",
+})
+
 
 @dataclass
 class QrsClient:
@@ -58,6 +73,10 @@ class QrsClient:
     def fetch_task_dependencies(self) -> list[dict[str, Any]]:
         return self._get("/qrs/compositeevent/full")
 
+    def read(self, path: str, filter_expr: str | None = None) -> list[dict[str, Any]]:
+        """Read any allow-listed resource with an optional QRS filter."""
+        return self._get(path, filter_expr=filter_expr)
+
     # -- HTTP ----------------------------------------------------------------
     def _headers(self) -> dict[str, str]:
         headers = {
@@ -69,6 +88,8 @@ class QrsClient:
         return headers
 
     def _get(self, path: str, filter_expr: str | None = None) -> list[dict[str, Any]]:
+        if path not in READ_ONLY_RESOURCES:
+            raise PermissionError(f"QRS path not allowed (read-only allow-list): {path}")
         url = f"{self.base_url.rstrip('/')}{path}"
         params: dict[str, Any] = {"xrfkey": self.xrf_key}
         if filter_expr:

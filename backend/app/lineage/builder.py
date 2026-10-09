@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-from typing import Iterable
+from typing import Any, Iterable
 
 from app.models.entities import GraphEdge, ParsedDependency, QlikApp, QlikTask
+
+# QRS composite-rule ruleState: which outcome of the upstream task fires the trigger.
+_RULE_STATES = {1: "success", 2: "failure"}
 
 
 class LineageBuilder:
@@ -66,6 +69,33 @@ class LineageBuilder:
                 edges.append(
                     GraphEdge("Task", task.task_id, "DEPENDS_ON", "Task", task.depends_on_task_id)
                 )
+        return self._dedupe(edges)
+
+    def build_task_chain_edges(self, composite_events: Iterable[dict[str, Any]],
+                               known_task_ids: set[str] | None = None) -> list[GraphEdge]:
+        """``(upstream Task)-[:TRIGGERS]->(downstream Task)`` from QRS task-chain triggers.
+
+        A QRS composite event starts its ``reloadTask`` once every rule's task
+        reaches the rule's state (1 = succeeded, 2 = failed). Only the structure is
+        kept - which task starts which - never run status. Disabled triggers never
+        fire, so they are not a real dependency and are skipped. ``known_task_ids``
+        drops links to tasks that are not reload tasks (e.g. external programs).
+        """
+        edges: list[GraphEdge] = []
+        for event in composite_events:
+            if not event.get("enabled"):
+                continue
+            target = (event.get("reloadTask") or {}).get("id")
+            if not target or (known_task_ids is not None and target not in known_task_ids):
+                continue
+            for rule in event.get("compositeRules") or []:
+                source = (rule.get("reloadTask") or {}).get("id")
+                if not source or source == target:
+                    continue
+                if known_task_ids is not None and source not in known_task_ids:
+                    continue
+                on = _RULE_STATES.get(rule.get("ruleState"), "unknown")
+                edges.append(GraphEdge("Task", source, "TRIGGERS", "Task", target, {"on": on}))
         return self._dedupe(edges)
 
     def _dedupe(self, edges: list[GraphEdge]) -> list[GraphEdge]:

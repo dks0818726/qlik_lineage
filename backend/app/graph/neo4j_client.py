@@ -11,7 +11,7 @@ except ImportError:  # pragma: no cover - neo4j optional at test time
     GraphDatabase = None  # type: ignore[assignment]
     Driver = None  # type: ignore[assignment]
 
-from app.graph.neo4j_upsert import bulk_upsert_payload, constraint_queries
+from app.graph.neo4j_upsert import REL_TYPES, bulk_upsert_payload, constraint_queries
 from app.models.entities import GraphEdge, SCRIPT_DERIVED_RELATIONS
 
 logger = logging.getLogger(__name__)
@@ -111,7 +111,26 @@ class Neo4jClient:
                 session.run(query, **params)
         return len(payload)
 
-    # -- reads ----------------------------------------------------------------
+    def replace_relation(self, relation: str, edges: Iterable[GraphEdge]) -> int:
+        """Swap every ``relation`` relationship for ``edges`` in one transaction.
+
+        Used for QRS-sourced structure that has no per-app owner (task chains), so
+        a trigger removed in QMC disappears on the next scan instead of lingering.
+        """
+        if relation not in REL_TYPES:
+            raise ValueError(f"Unknown relation type: {relation}")
+        if self._driver is None:
+            self.connect()
+        if self._driver is None:
+            return 0
+        payload = bulk_upsert_payload(edges)
+        with self._driver.session() as session:
+            with session.begin_transaction() as tx:
+                tx.run(f"MATCH ()-[r:{relation}]->() DELETE r")
+                for query, params in payload:
+                    tx.run(query, **params)
+                tx.commit()
+        return len(payload)
     # Agent tool calls feed these chains straight into an LLM prompt, and 500 full
     # path chains routinely exceeded the model context window (one failure measured
     # at 185k tokens against a 64k limit), so agent-facing calls default to a bounded
